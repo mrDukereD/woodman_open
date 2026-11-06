@@ -1,26 +1,21 @@
 // update_mode.inc - режим "wood_server.exe update" (автообновление докера). Включается в main.cpp (одна единица трансляции).
 //
-//   wood_server.exe update --url <zip> [--sig-url <sig>] --addons "<...\Addons>" [--corel-pid N] [--corel-exe путь] [--corel-args строка]
+//   wood_server.exe update --from-stage --stage-dir "<папка>" --addons "<...\Addons>" [--corel-pid N] [--corel-exe путь] [--corel-args строка]
 //                          [--work "<папка рендера>"] [--lang ru|en] [--no-ui] [--result файл] [--stage2]
+//
+// Сети в этом режиме НЕТ: архив (update.zip) и подпись (update.sig) заранее кладёт в --stage-dir докер (скачивает сам Corel).
+// Подпись проверяется здесь (папка пользовательская, а установщик идёт от администратора). После успеха и после неверной
+// подписи/негодного архива файлы папки удаляются.
 //
 // Порядок (всё, что может не получиться, - ДО закрытия Corel):
 //   1. копия себя в %TEMP% и запуск оттуда (установщик перезапишет bin\wood_server.exe, пока он занят - не выйдет);
-//   2. скачивание архива и подписи (WinHTTP, TLS 1.2), проверка подписи ключом разработчика (pubkey_release.h);
+//   2. чтение архива и подписи из папки, проверка подписи ключом разработчика (pubkey_release.h);
 //   3. распаковка (miniz) в %TEMP%, проверка состава (wood_install.exe, wpanel\js\sys.js);
 //   4. остановка сервера просмотра, закрытие Corel (WM_CLOSE - Corel сам спросит про сохранение), ожидание, пока он отпустит DLL;
 //   5. тихий установщик (манифест просит администратора - один запрос UAC), результат читаем из --result установщика;
 //   6. Corel запускается снова ВСЕГДА (даже если установка откатилась); временные файлы чистит докер (VBA dockerAutoRun).
-// Коды: 0 ок; 60 скачать не удалось; 61 подпись неверна; 62 негодный архив; 63 Corel не закрылся/отмена; 64 установщик
-// не отработал (код и текст - в сообщении); 65 прочее.
-//
-// Фоновая загрузка (панель по таймеру, пока пользователь работает):
-//   wood_server.exe update --download-only --url <zip> (--sig-b64 <подпись> | --sig-url <sig>) --stage-dir "<папка>" --stage-id "<метка версии>"
-//     скачивает zip, проверяет подпись и кладёт в папку update.zip, update.sig и (последним) meta.txt с меткой версии: нет meta.txt -
-//     папка считается пустой. Без окна, Corel не трогает. Та же метка уже лежит - ничего не делает. Параллельный второй запуск
-//     (две копии Corel) упирается в монопольный stage.lock и тихо выходит с кодом 0, ничего не трогая.
-//   wood_server.exe update --from-stage --stage-dir "<папка>" --addons ...   (остальное как при обычном обновлении)
-//     то же обновление, но архив берётся из папки, скачивания нет. Подпись проверяется ЗАНОВО (папка пользовательская, а установщик
-//     идёт от администратора). После успеха и после неверной подписи/негодного архива файлы папки удаляются.
+// Коды: 0 ок; 61 подпись неверна; 62 негодный архив (в том числе нет файлов в папке); 63 Corel не закрылся/отмена; 64 установщик
+// не отработал (код и текст - в сообщении); 65 прочее. (Код 60 "скачать не удалось" больше не используется: качает не exe.)
 #include <winhttp.h>
 #include <commctrl.h>
 #include "miniz.h"
@@ -122,7 +117,6 @@ static void progress(int pct)
 }
 
 // ---------- скачивание (WinHTTP) ----------
-struct DlCtx { ULONGLONG total = 0; };
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4   // сборка идёт с _WIN32_WINNT=0x0601, в заголовке константы нет
 #endif
@@ -133,79 +127,6 @@ static HINTERNET openSession(const wchar_t* agent)
     HINTERNET s = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) s = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     return s;
-}
-
-static bool downloadOnce(const wstring& url, const wstring& dest, int pctFrom, int pctTo, string* err)
-{
-    wchar_t host[256] = {}, path[4096] = {};
-    URL_COMPONENTSW uc = {};
-    uc.dwStructSize = sizeof uc;
-    uc.lpszHostName = host; uc.dwHostNameLength = 255;
-    uc.lpszUrlPath = path; uc.dwUrlPathLength = 4095;
-    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) { *err = "bad url"; return false; }
-    wstring full = path;
-    if (uc.lpszExtraInfo && uc.dwExtraInfoLength) full += wstring(uc.lpszExtraInfo, uc.dwExtraInfoLength);
-    HINTERNET ses = openSession(L"woodman-updater/1.0");
-    if (!ses) { *err = "WinHttpOpen"; return false; }
-    DWORD protos = 0x00000800 | 0x00000200 | 0x00000080;           // TLS 1.2 | 1.1 | 1.0 (на Win7 TLS 1.2 надо включать явно)
-    WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &protos, sizeof protos);
-    HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
-    HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", full.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                              uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-    bool ok = false;
-    HANDLE f = INVALID_HANDLE_VALUE;
-    if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr)) {
-        DWORD code = 0, sz = sizeof code;
-        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
-        if (code != 200) { *err = "http " + std::to_string(code); }
-        else {
-            wchar_t lenBuf[32] = {}; sz = sizeof lenBuf;
-            ULONGLONG total = 0;
-            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, lenBuf, &sz, WINHTTP_NO_HEADER_INDEX)) total = _wtoi64(lenBuf);
-            f = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (f == INVALID_HANDLE_VALUE) { *err = "cannot create " + toUtf8(dest); }
-            else {
-                ULONGLONG got = 0;
-                std::vector<char> buf(1 << 16);
-                ok = true;
-                for (;;) {
-                    if (g_cancel) { *err = "cancelled"; ok = false; break; }
-                    DWORD n = 0;
-                    if (!WinHttpReadData(req, buf.data(), (DWORD)buf.size(), &n)) { *err = "read error"; ok = false; break; }
-                    if (n == 0) break;
-                    DWORD w = 0;
-                    if (!WriteFile(f, buf.data(), n, &w, nullptr) || w != n) { *err = "write error"; ok = false; break; }
-                    got += n;
-                    if (total) progress(pctFrom + (int)((pctTo - pctFrom) * got / total));
-                }
-                if (ok && total && got != total) { *err = "incomplete download"; ok = false; }
-            }
-        }
-    } else if (err->empty()) {
-        *err = "winhttp error " + std::to_string(GetLastError());
-    }
-    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
-    if (req) WinHttpCloseHandle(req);
-    if (con) WinHttpCloseHandle(con);
-    WinHttpCloseHandle(ses);
-    return ok;
-}
-
-// Скачивание с двумя повторами (всего три попытки): обрыв, недокачанный файл (размер не равен Content-Length), ошибка чтения,
-// сбой связи или ответ сервера 5xx. Отмену, ошибку создания файла и ответы 4xx повторять незачем. Файл на сайте статичный,
-// ссылка на него от повторной загрузки не гаснет.
-static bool download(const wstring& url, const wstring& dest, int pctFrom, int pctTo, string* err)
-{
-    for (int attempt = 1; ; attempt++) {
-        err->clear();
-        if (downloadOnce(url, dest, pctFrom, pctTo, err)) return true;
-        bool retry = (*err == "incomplete download" || *err == "read error" || err->compare(0, 12, "winhttp erro") == 0 ||
-                      err->compare(0, 6, "http 5") == 0);
-        if (!retry || attempt >= 3 || g_cancel) return false;
-        ulog(L"download: attempt " + std::to_wstring(attempt) + L" failed (" + toWide(*err) + L"), retrying");
-        DeleteFileW(dest.c_str());
-        Sleep(2000);
-    }
 }
 
 // антивирус сразу после записи держит файл на проверке: пробуем читать до 5 с
@@ -436,9 +357,9 @@ static wstring tempDirFor(const wchar_t* tag)
 }
 
 struct Args {
-    wstring url, sigUrl, sigB64, addons, corelExe, corelArgs, work, resultFile, installerExtra, stageDir, stageId;
+    wstring addons, corelExe, corelArgs, work, resultFile, installerExtra, stageDir;
     DWORD corelPid = 0;
-    bool stage2 = false, keepTemp = false, downloadOnly = false, fromStage = false;
+    bool stage2 = false, keepTemp = false;
     int closeTimeout = 600;            // сек. ждать закрытия Corel (стенд сокращает)
     int unloadTimeout = 30;            // сек. ждать, пока докер выгрузит main.dll
 };
@@ -459,64 +380,19 @@ static void clearStage(const wstring& dir)
     RemoveDirectoryW(dir.c_str());
 }
 
-static void releaseRemote(const wstring& url, const wstring& file);          // после скачивания просит сайт удалить временную копию архива (определена после apiPost)
-
-static int doStage(const Args& a, wstring* errText)
-{
-    const wstring& dir = a.stageDir;
-    wstring part = dir + L"\\update.zip.part", zipPath = dir + L"\\update.zip", sigPath = dir + L"\\update.sig", meta = dir + L"\\meta.txt";
-    string err, cur, id = toUtf8(a.stageId);
-    ulog(L"=== stage start: url=" + a.url + L" dir=" + dir + L" id=" + a.stageId);
-    makeDirs(dir);
-    // замок на всё время работы: две копии Corel стартуют вместе - второй запуск тихо выходит и ничего не трогает
-    HANDLE lock = CreateFileW((dir + L"\\stage.lock").c_str(), GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-    if (lock == INVALID_HANDLE_VALUE) { ulog(L"stage: another run is active"); return 0; }
-    struct LockGuard { HANDLE h; ~LockGuard() { CloseHandle(h); } } lockGuard = { lock };
-    if (readFile(meta, cur, 4096) && cur == id && exists(zipPath) && exists(sigPath)) { ulog(L"stage: already downloaded"); return 0; }
-    clearStage(dir);                                         // другая версия или недокачанное: начинаем заново
-    makeDirs(dir);
-    if (!download(a.url, part, 0, 100, &err)) { *errText = wstring(tr(E_DOWN)) + L" (" + toWide(err) + L")"; DeleteFileW(part.c_str()); ulog(L"stage: " + *errText); return 60; }
-    releaseRemote(a.url, part);
-    if (!a.sigB64.empty()) {
-        string sb = toUtf8(a.sigB64);
-        if (!writeFile(sigPath, sb.data(), sb.size())) { *errText = wstring(tr(E_AV)) + L" (write update.sig, " + std::to_wstring(GetLastError()) + L")"; clearStage(dir); return 62; }
-    } else if (!download(a.sigUrl.empty() ? a.url + L".sig" : a.sigUrl, sigPath, 0, 0, &err)) { *errText = wstring(tr(E_DOWN)) + L" (" + toWide(err) + L")"; clearStage(dir); return 60; }
-    {
-        string zipData, sigText;
-        DWORD le = 0;
-        if (!readRetry(part, zipData, 512ULL * 1024 * 1024, &le)) { *errText = wstring(tr(E_AV)) + L" (read update.zip.part, " + std::to_wstring(le) + L")"; clearStage(dir); return 62; }
-        if (!readRetry(sigPath, sigText, 65536, &le)) { *errText = wstring(tr(E_AV)) + L" (read update.sig, " + std::to_wstring(le) + L")"; clearStage(dir); return 62; }
-        if (!verifyArchive(zipData, sigText)) { *errText = tr(E_SIG); clearStage(dir); ulog(L"stage: signature invalid"); return 61; }
-    }
-    if (!MoveFileExW(part.c_str(), zipPath.c_str(), MOVEFILE_REPLACE_EXISTING)) { *errText = wstring(tr(E_AV)) + L" (rename update.zip, " + std::to_wstring(GetLastError()) + L")"; clearStage(dir); return 62; }
-    if (!writeFile(meta, id.data(), id.size())) { *errText = wstring(tr(E_AV)) + L" (write meta.txt, " + std::to_wstring(GetLastError()) + L")"; clearStage(dir); return 62; }
-    ulog(L"stage: ready");
-    return 0;
-}
-
 // основная работа (в рабочем потоке или синхронно при --no-ui); возвращает код выхода
 static int doUpdate(const Args& a, wstring* errText)
 {
     wstring tmp = tempDirFor((L"wood_update_" + std::to_wstring(GetCurrentProcessId())).c_str());
     makeDirs(tmp);
-    wstring zipPath = tmp + L"\\update.zip", sigPath = tmp + L"\\update.sig", pkg = tmp + L"\\pkg";
-    if (a.fromStage) { zipPath = a.stageDir + L"\\update.zip"; sigPath = a.stageDir + L"\\update.sig"; }
-    wstring root = pkg;                                      // папка с wood_install.exe: корень распаковки или единственная вложенная ("woodman docker")
+    wstring zipPath = a.stageDir + L"\\update.zip", sigPath = a.stageDir + L"\\update.sig", pkg = tmp + L"\\pkg";     // архив и подпись уже скачала панель (Corel)
+    wstring root = pkg;                                     // папка с wood_install.exe: корень распаковки или единственная вложенная ("woodman docker")
     string err;
     int rc = 0;
     bool keepCorel = false;                                  // Corel остаётся открытым (proxy не менялся)
 
-    ulog(L"=== update start: url=" + a.url + L" addons=" + a.addons + L" corelPid=" + std::to_wstring(a.corelPid) + L" corelExe=" + a.corelExe + L" tmp=" + tmp + (a.fromStage ? L" stage=" + a.stageDir : L""));
-    if (a.fromStage) progress(50);                            // архив уже скачан в фоне
-    else {
-        status(tr(T_DOWN)); progress(0);
-        if (!download(a.url, zipPath, 0, 45, &err)) { *errText = wstring(tr(E_DOWN)) + L" (" + toWide(err) + L")"; rc = 60; goto done; }
-        releaseRemote(a.url, zipPath);
-        if (!a.sigB64.empty()) {                                  // подпись пришла вместе со ссылкой (ответ сервера)
-            string sb = toUtf8(a.sigB64);
-            if (!writeFile(sigPath, sb.data(), sb.size())) { *errText = wstring(tr(E_AV)) + L" (write update.sig, " + std::to_wstring(GetLastError()) + L")"; rc = 62; goto done; }
-        } else if (!download(a.sigUrl.empty() ? a.url + L".sig" : a.sigUrl, sigPath, 45, 50, &err)) { *errText = wstring(tr(E_DOWN)) + L" (" + toWide(err) + L")"; rc = 60; goto done; }
-    }
+    ulog(L"=== update start: stage=" + a.stageDir + L" addons=" + a.addons + L" corelPid=" + std::to_wstring(a.corelPid) + L" corelExe=" + a.corelExe + L" tmp=" + tmp);
+    progress(50);                                             // архив уже скачан
 
     {
         status(tr(T_SIG)); progress(52);
@@ -593,8 +469,8 @@ done:
         string il;
         if (readFile(tmp + L"\\installer.log", il, 65536)) ulog(L"installer.log:\r\n" + toWide(il));
     }
-    // скачанное в фоне: поставилось - больше не нужно; подпись/архив негодные - не оставлять, следующий раз скачается заново
-    if (a.fromStage && (rc == 0 || rc == 61 || rc == 62)) clearStage(a.stageDir);
+    // скачанное: поставилось - больше не нужно; подпись/архив негодные - не оставлять, следующий раз скачается заново
+    if (rc == 0 || rc == 61 || rc == 62) clearStage(a.stageDir);
     if (!a.work.empty()) {                                   // итог для докера (живой или перезапущенный Corel): 0 - поставлено
         string c = std::to_string(rc);
         writeFile(workFile(a.work, L"update.done"), c.data(), c.size());
@@ -676,10 +552,7 @@ static int run(int argc, wchar_t** argv)
     for (int i = 2; i < argc; i++) {
         wstring k = argv[i], v;
         auto next = [&](wstring& dst) { if (i + 1 < argc) dst = argv[++i]; };
-        if (k == L"--url") next(a.url);
-        else if (k == L"--sig-url") next(a.sigUrl);
-        else if (k == L"--sig-b64") next(a.sigB64);
-        else if (k == L"--addons") next(a.addons);
+        if (k == L"--addons") next(a.addons);
         else if (k == L"--corel-exe") next(a.corelExe);
         else if (k == L"--corel-args") next(a.corelArgs);
         else if (k == L"--corel-pid") { next(v); a.corelPid = (DWORD)_wtoi(v.c_str()); }
@@ -689,18 +562,12 @@ static int run(int argc, wchar_t** argv)
         else if (k == L"--no-ui") noUi = true;
         else if (k == L"--stage2") a.stage2 = true;
         else if (k == L"--keep-temp") a.keepTemp = true;
-        else if (k == L"--download-only") a.downloadOnly = true;
-        else if (k == L"--from-stage") a.fromStage = true;
+        else if (k == L"--from-stage") { }                      // единственный режим; ключ оставлен: его по-прежнему передаёт main.dll
         else if (k == L"--stage-dir") next(a.stageDir);
-        else if (k == L"--stage-id") next(a.stageId);
     }
     g_ru = !(lang.size() >= 2 && (lang.compare(0, 2, L"en") == 0 || lang.compare(0, 2, L"de") == 0 || lang.compare(0, 2, L"es") == 0 || lang.compare(0, 2, L"pt") == 0 || lang.compare(0, 2, L"tr") == 0 || lang.compare(0, 2, L"zh") == 0 || lang.compare(0, 2, L"ar") == 0));
     g_noUi = noUi;
-    if (a.downloadOnly && a.fromStage) { fprintf(stderr, "update: --download-only и --from-stage вместе нельзя\n"); return 2; }
-    if (a.downloadOnly ? (a.url.empty() || a.stageDir.empty() || a.stageId.empty())
-        : a.fromStage ? (a.stageDir.empty() || a.addons.empty())
-        : (a.url.empty() || a.addons.empty())) { fprintf(stderr, "update: не хватает аргументов (--url, --addons, --stage-dir, --stage-id)\n"); return 2; }
-    if (!a.url.empty() && a.url.compare(0, 21, L"https://mrwoodman.by/") != 0) { fprintf(stderr, "update: адрес архива должен быть на https://mrwoodman.by/\n"); return 2; }   // подпись всё равно проверится
+    if (a.stageDir.empty() || a.addons.empty()) { fprintf(stderr, "update: не хватает аргументов (--stage-dir, --addons); архив и подпись скачивает панель (Corel) в stage-dir\n"); return 2; }
     while (a.addons.size() > 3 && (a.addons.back() == L'\\' || a.addons.back() == L'/')) a.addons.pop_back();
     while (a.stageDir.size() > 3 && (a.stageDir.back() == L'\\' || a.stageDir.back() == L'/')) a.stageDir.pop_back();
 
@@ -722,12 +589,6 @@ static int run(int argc, wchar_t** argv)
     Work w;
     w.a = a;
     int rc;
-    if (a.downloadOnly) {                                    // фоновая загрузка: без окна, ошибки только в журнал
-        g_noUi = true;
-        rc = doStage(a, &w.err);
-        writeResult(rc, w.err);
-        return rc;
-    }
     if (noUi) { rc = doUpdate(a, &w.err); if (rc && !w.err.empty()) status(w.err); }
     else { rc = runWithWindow(w); w.rc = rc; }
     writeResult(rc, w.err);
@@ -794,21 +655,6 @@ static bool apiPost(const wstring& url, const string& body, int timeoutSec, stri
     if (con) WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
     return ok;
-}
-
-// Архив скачан целиком (download сверил размер) - сообщаем сайту его размер и просим убрать временную копию из wpfiles/dn (действие release): иначе они копятся до очистки по сроку.
-// Только ссылки на этот самый каталог сайта; сбой не страшен (сайт всё равно чистит по сроку), в журнал пишем и идём дальше.
-static void releaseRemote(const wstring& url, const wstring& file)
-{
-    static const wchar_t* pre = L"https://mrwoodman.by/wpfiles/dn/";
-    if (url.compare(0, wcslen(pre), pre) != 0 || url.find_first_of(L"\"\\") != wstring::npos) return;
-    WIN32_FILE_ATTRIBUTE_DATA fa = {};
-    if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &fa)) return;
-    unsigned long long size = ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;   // сколько реально лежит у нас
-    string body = string("{\"a\":\"release\",\"v\":1,\"url\":\"") + toUtf8(url) + "\",\"size\":" + std::to_string(size) + "}", resp;
-    DWORD st = 0, le = 0;
-    bool ok = apiPost(L"https://mrwoodman.by/panel_api.php", body, 10, resp, st, le);
-    ulog(L"release: " + (ok ? L"http " + std::to_wstring(st) : L"no answer, err " + std::to_wstring(le)));
 }
 
 // Файл ответа появляется целиком: пишется во временный и переименовывается, докер ждёт именно его появления.

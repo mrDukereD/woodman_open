@@ -4,7 +4,7 @@ Two small Windows helpers of the [Woodman docker](https://mrwoodman.by/) for Cor
 
 | Folder | What it is |
 |---|---|
-| `wood_server/` | `wood_server.exe`: local viewer/render helper, the docker's HTTPS client (JSON API of the site) and the docker auto-updater. |
+| `wood_server/` | `wood_server.exe`: local viewer/render helper, fallback HTTPS client of the docker (JSON API of the site) and the docker updater (verifies, unpacks and installs an archive that the docker has already downloaded). |
 | `wood_install/` | `wood_install.exe`: installer of the docker (GUI and `--silent` mode used by the auto-updater), with backups and restore. |
 | `third_party/miniz/` | [miniz](https://github.com/richgel999/miniz) (public domain / unlicense), used to unpack update archives. |
 
@@ -17,7 +17,7 @@ Both programs are plain Win32 C++ (no external dependencies except miniz). The d
 
 ## Что программы делают в сети
 
-`wood_server.exe` обращается только к `https://mrwoodman.by/` (`panel_api.php`, `share.php`, архивы обновления) и к `127.0.0.1` (свой сервер просмотра). Архив обновления перед установкой проверяется открытым ключом разработчика (`wood_server/pubkey_release.h`, RSA-SHA256): подпись неверна — установки нет. Закрытый ключ в репозиторий не входит.
+`wood_server.exe` обращается только к `https://mrwoodman.by/` (`panel_api.php` как запасной путь докера и `share.php` для «Поделиться») и к `127.0.0.1` (свой сервер просмотра). Режим `update` сети не использует: архив скачивает сам CorelDRAW. Архив обновления перед установкой проверяется открытым ключом разработчика (`wood_server/pubkey_release.h`, RSA-SHA256): подпись неверна — установки нет. Закрытый ключ в репозиторий не входит.
 
 ## Сборка
 
