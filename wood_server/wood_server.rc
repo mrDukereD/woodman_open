@@ -1,0 +1,33 @@
+#include <winver.h>
+
+// Манифест: обычные права (asInvoker), без повышения; список ОС - чтобы Windows не включала режим совместимости.
+1 24 "wood_server.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Woodman (mrwoodman.by)"
+            VALUE "FileDescription", "Woodman docker helper: 3D box render, viewer and docker update"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "wood_server"
+            VALUE "LegalCopyright", "Woodman (mrwoodman.by)"
+            VALUE "OriginalFilename", "wood_server.exe"
+            VALUE "ProductName", "Woodman docker for CorelDRAW"
+            VALUE "ProductVersion", "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

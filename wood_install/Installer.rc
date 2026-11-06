@@ -1,0 +1,71 @@
+#include "resource.h"
+#include <windows.h>
+
+IDI_MAINICON ICON "woodman.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          0x40004L
+FILETYPE        0x1L
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041904B0"
+        BEGIN
+            VALUE "CompanyName", "mrWoodman"
+            VALUE "FileDescription", "WPanel Installer for CorelDRAW"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "InternalName", "wood_install"
+            VALUE "OriginalFilename", "wood_install.exe"
+            VALUE "ProductName", "WPanel for CorelDRAW"
+            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "LegalCopyright", "mrWoodman"
+            VALUE "Comments", "mrwoodman@mrwoodman.by"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x419, 1200
+    END
+END
+
+IDD_MAIN DIALOGEX 0, 0, 522, 220
+STYLE DS_SETFONT | WS_MINIMIZEBOX | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "WPanel Installer"
+FONT 9, "Segoe UI", 0, 0, 0x1
+BEGIN
+	LTEXT           "Detected CorelDRAW Addons folders:", IDC_STATIC_FOUND, 12, 12, 400, 14
+	LISTBOX         IDC_LIST_PATHS, 12, 28, 306, 70, LBS_NOTIFY | LBS_WANTKEYBOARDINPUT | WS_VSCROLL | WS_TABSTOP
+	DEFPUSHBUTTON   "Install", IDC_BTN_INSTALL, 12, 98, 223, 22, BS_OWNERDRAW
+	PUSHBUTTON      "Video", IDC_BTN_VIDEO, 30, 133, 120, 17, BS_OWNERDRAW
+	PUSHBUTTON      "Telegram", IDC_BTN_TELEGRAM, 170, 133, 120, 17, BS_OWNERDRAW
+	PUSHBUTTON      "Select folder", IDC_BTN_BROWSE, 247, 98, 71, 22
+	PUSHBUTTON      "Backup settings", IDC_BTN_BACKUP_SETTINGS, 12, 168, 94, 17
+	PUSHBUTTON      "Restore settings", IDC_BTN_RESTORE_SETTINGS, 118, 168, 94, 17
+	PUSHBUTTON      "Full cleanup", IDC_BTN_FULL_CLEANUP, 224, 168, 94, 17
+	LTEXT           "Language:", IDC_STATIC_LANG, 12, 201, 60, 14
+	COMBOBOX        IDC_CMB_LANG, 50, 199, 82, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+	PUSHBUTTON      "Corel Tweak", IDC_BTN_COREL_TWEAK, 145, 196, 80, 17
+	PUSHBUTTON      "Exit", IDC_BTN_EXIT, 238, 196, 80, 17
+	LTEXT           "Target folder:", IDC_STATIC_TARGET, 12, 999, 80, 12
+	EDITTEXT        IDC_EDIT_TARGET, 12, 997, 330, 14, ES_AUTOHSCROLL
+	LTEXT           "INSTRUCTIONS", IDC_STATIC_INSTR_TITLE, 331, 12, 183, 14
+	EDITTEXT        IDC_EDIT_INSTRUCTION, 331, 28, 183, 185,
+	ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+END
+
+IDD_RESTORE DIALOGEX 0, 0, 330, 160
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Restore from backup"
+FONT 9, "Segoe UI", 0, 0, 0x1
+BEGIN
+	LTEXT           "Backups:", IDC_STATIC_BACKUPS, 10, 8, 310, 12
+	LISTBOX         IDC_LIST_BACKUPS, 10, 22, 310, 100, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP | WS_BORDER
+	AUTOCHECKBOX    "Only settings", IDC_CHK_ONLY_SETTINGS, 10, 126, 200, 12
+	DEFPUSHBUTTON   "Restore", IDOK, 180, 140, 70, 15
+	PUSHBUTTON      "Cancel", IDCANCEL, 255, 140, 65, 15
+END

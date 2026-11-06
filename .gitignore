@@ -1,0 +1,20 @@
+# закрытые ключи подписи - НИКОГДА не публиковать
+keys/
+*.pem
+*.pfx
+
+# результаты сборки
+build/
+out/
+Release/
+Debug/
+x64/
+x86/
+.vs/
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exe
+*.log
+wood_install/wood_install/
