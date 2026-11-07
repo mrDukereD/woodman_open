@@ -832,15 +832,17 @@ static void LaunchCorelFor(const std::wstring& addonsPath)
     if (!PathFileExistsW(exe.c_str())) { LogLine(L"INFO: CorelDRW.exe not found: " + exe); return; }
     ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"\"" + exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
 }
-static void ShowDoneAskRun(HWND hDlg, const std::wstring& text, const std::wstring& addonsPath)
+// Возвращает true, если пользователь выбрал запуск Corel (тогда установщик закрывается).
+static bool ShowDoneAskRun(HWND hDlg, const std::wstring& text, const std::wstring& addonsPath)
 {
     size_t cut = addonsPath.find_last_of(L'\\');
     const bool haveExe = cut != std::wstring::npos && PathFileExistsW((addonsPath.substr(0, cut) + L"\\CorelDRW.exe").c_str());
-    if (!haveExe) { MessageBoxW(hDlg, text.c_str(), T(L"Title").c_str(), MB_OK | MB_ICONINFORMATION); return; }
+    if (!haveExe) { MessageBoxW(hDlg, text.c_str(), T(L"Title").c_str(), MB_OK | MB_ICONINFORMATION); return false; }
     g_btnHook = SetWindowsHookExW(WH_CBT, BtnCaptionHook, nullptr, GetCurrentThreadId());
     int r = MessageBoxW(hDlg, text.c_str(), T(L"Title").c_str(), MB_YESNO | MB_ICONINFORMATION);
     if (g_btnHook) { UnhookWindowsHookEx(g_btnHook); g_btnHook = nullptr; }
-    if (r == IDYES) LaunchCorelFor(addonsPath);
+    if (r == IDYES) { LaunchCorelFor(addonsPath); return true; }
+    return false;
 }
 
 static void ShowMsg(HWND hDlg, const std::wstring& text, UINT icon = MB_ICONINFORMATION)
@@ -1614,7 +1616,10 @@ static bool DoInstall(HWND hDlg)
     if (pos != std::wstring::npos) {
         successMsg.replace(pos, 3, g_version);
     }
-    ShowDoneAskRun(hDlg, successMsg, targetAddons);
+    if (ShowDoneAskRun(hDlg, successMsg, targetAddons)) {
+        EndDialog(hDlg, 0);   // Corel запущен - установщик закрываем
+        return true;
+    }
     RefreshDetectedList(hDlg);
     return true;
 }

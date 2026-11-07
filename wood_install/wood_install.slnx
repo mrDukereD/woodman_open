@@ -1,7 +1,6 @@
 <Solution>
   <Configurations>
     <Platform Name="x64" />
-    <Platform Name="x86" />
   </Configurations>
   <Project Path="wood_install.vcxproj" Id="32f9a998-30b7-419b-8487-d684e4365ee8" />
 </Solution>
