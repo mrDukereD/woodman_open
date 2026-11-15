@@ -608,7 +608,7 @@ static wstring saveThumb(const wstring& dir) {
     }
     return any;
 }
-// POST /saves/<save|load|delete|rename>?name=..[&to=..][&overwrite=1]; ответ {"ok":true} либо {"ok":false,"error":..,"exists":true}
+// POST /saves/<save|load|delete|rename|put>?name=..[&to=..][&overwrite=1]; ответ {"ok":true} либо {"ok":false,"error":..,"exists":true}
 static void savesAction(SOCKET s, const Req& rq, const string& act, const string& extra) {
     auto fail = [&](int code, const string& err, bool ex = false) {
         replyJson(s, code, "{\"ok\":false,\"error\":\"" + jsonEsc(err) + "\"" + (ex ? ",\"exists\":true" : "") + "}", extra);
@@ -632,6 +632,30 @@ static void savesAction(SOCKET s, const Req& rq, const string& act, const string
         if (!ok) { rmTree(tmpd); return fail(500, "не удалось скопировать файлы (диск, права?)"); }
         rmTree(dir);
         if (!MoveFileExW(tmpd.c_str(), dir.c_str(), MOVEFILE_REPLACE_EXISTING)) { rmTree(tmpd); return fail(500, "не удалось записать сохранение"); }
+        return replyJson(s, 200, "{\"ok\":true}", extra);
+    }
+    // put?name=..&file=<путь>[&new=1[&overwrite=1]]: один файл нового сохранения из тела запроса («Забрать сборку» с сайта: окно кладёт пакет как сохранение и тут же его загружает).
+    // new=1 - первый файл: сохранение заводится заново (есть такое и нет overwrite - 409). Пути - только те, что даёт пакет сайта.
+    if (act == "put") {
+        string f = rq.q("file");
+        bool okF = f == "config.js" || f == "thumb.png" || f == "input/scene.svg" || f == "input/pins.json" || f == "input/solve.json" || f == "input/materials.json";
+        if (!okF && f.size() > 10 && f.size() < 24 && f.compare(0, 10, "input/img/") == 0) {
+            okF = true;
+            string n = f.substr(10);
+            size_t d = n.find('.');
+            if (d == string::npos || d == 0 || d > 4 || (lower(n.substr(d)) != ".png" && lower(n.substr(d)) != ".webp")) okF = false;
+            for (size_t i = 0; okF && i < d; i++) if (n[i] < '0' || n[i] > '9') okF = false;
+        }
+        if (!okF) return fail(400, "недопустимый файл");
+        if (rq.q("new") == "1") {
+            if (exists(dir) && rq.q("overwrite") != "1") return fail(409, "сохранение с таким именем уже есть", true);
+            rmTree(dir);
+        } else if (!exists(dir)) return fail(404, "сохранения нет");
+        wstring wf = toWide(f);
+        for (auto& c : wf) if (c == L'/') c = L'\\';
+        wstring full = dir + L"\\" + wf;
+        makeDirs(full.substr(0, full.rfind(L'\\')));
+        if (!writeFile(full, rq.body.data(), rq.body.size())) return fail(500, "не удалось записать файл");
         return replyJson(s, 200, "{\"ok\":true}", extra);
     }
     if (!exists(dir)) return fail(404, "сохранения нет");
@@ -666,7 +690,7 @@ static void savesAction(SOCKET s, const Req& rq, const string& act, const string
 // ---------- «Поделиться»: ретрансляция окна просмотра в share.php сайта ----------
 // Окно шлёт POST /api/share/<действие>, wood_server добавляет почту и серийник и пересылает на сайт; ответ сайта (JSON) отдаётся окну как есть.
 // Почту и серийник пишет панель при запуске окна в work\share_auth.txt (строка 1 - почта, строка 2 - серийник; js\sys.js woodRenderStart), в страницу они не попадают.
-// Действия: list | renew {slot} | clear {slot} | up_begin {slot} | up_file?id=..&name=.. (тело - сам файл как есть, на сайт уходит multipart) | up_end {id, label} | up_abort {id}.
+// Действия: list | renew {slot} | clear {slot} | take {slot[, name]} (пакет обратно в окно: список файлов / файл base64) | up_begin {slot} | up_file?id=..&name=.. (тело - сам файл как есть, на сайт уходит multipart) | up_end {id, label} | up_abort {id}.
 // Сайт по умолчанию https://mrwoodman.by/share.php; переменная окружения WOOD_SHARE_URL заменяет адрес (стенды: поддельный сайт на 127.0.0.1).
 // Нет файла с почтой - {"ok":false,"error":"no_license"}; нет связи с сайтом - 502 и {"ok":false,"error":"net"}.
 static bool shareAuthRead(string& email, string& serial) {
@@ -781,7 +805,7 @@ static bool sharePost(const string& ctype, const string& body, string& out, DWOR
     return ok;
 }
 static void shareRelay(SOCKET s, Req& rq, const string& act, const string& extra) {
-    if (act != "list" && act != "renew" && act != "clear" && act != "download" && act != "move" && act != "rename" && act != "edit" && act != "cats" && act != "up_begin" && act != "up_file" && act != "up_end" && act != "up_abort")
+    if (act != "list" && act != "renew" && act != "clear" && act != "download" && act != "move" && act != "rename" && act != "edit" && act != "cats" && act != "up_begin" && act != "up_file" && act != "up_end" && act != "up_abort" && act != "take")
         return replyJson(s, 404, "{\"ok\":false,\"error\":\"bad_action\"}", extra);
     string email, serial;
     if (!shareAuthRead(email, serial)) return replyJson(s, 200, "{\"ok\":false,\"error\":\"no_license\"}", extra);
@@ -810,6 +834,7 @@ static void shareRelay(SOCKET s, Req& rq, const string& act, const string& extra
         if (shareJsonVal(rq.body, "on", v)) body += "&on=" + shareEnc(v);         // download: галочка «поделиться файлом» (1 / 0)
         if (shareJsonVal(rq.body, "to", v)) body += "&to=" + shareEnc(v);         // move: 0 - в публичные, N - в обычный слот N
         if (shareJsonVal(rq.body, "cats", v)) body += "&cats=" + shareEnc(v);     // cats: разделы галереи, ключи через запятую (пустая строка - снять все)
+        if (shareJsonVal(rq.body, "name", v)) body += "&name=" + shareEnc(v);     // take: файл пакета (пусто / нет - список файлов)
         if (shareJsonVal(rq.body, "lang", v)) body += "&lang=" + shareEnc(v);     // язык подписей разделов в ответе (catalog): код языка докера, сайт знает ru / en / ar, остальные - en
         ctype = "application/x-www-form-urlencoded";
     }
@@ -1210,7 +1235,7 @@ static void serve(SOCKET s) {
     }
     if (rq.h.count("transfer-encoding")) return reply(s, 411, "chunked not supported");
     unsigned long long clen = rq.h.count("content-length") ? strtoull(rq.h["content-length"].c_str(), nullptr, 10) : 0;
-    unsigned long long limit = (rq.path == "/save" || rq.path == "/file" || rq.path == "/video") ? 200ULL * 1024 * 1024 : (rq.path == "/api/share/up_file" || rq.path == "/scene" ? 64ULL * 1024 * 1024 : (rq.path == "/solve" || rq.path == "/collisions" ? 8ULL * 1024 * 1024 : 2ULL * 1024 * 1024));
+    unsigned long long limit = (rq.path == "/save" || rq.path == "/file" || rq.path == "/video") ? 200ULL * 1024 * 1024 : (rq.path == "/api/share/up_file" || rq.path == "/scene" ? 64ULL * 1024 * 1024 : (rq.path == "/solve" || rq.path == "/collisions" || rq.path == "/saves/put" ? 8ULL * 1024 * 1024 : 2ULL * 1024 * 1024));
     if (clen > limit) return reply(s, 413, "too large");
     rq.body = buf.substr(hend + 4);
     while (rq.body.size() < clen) {
