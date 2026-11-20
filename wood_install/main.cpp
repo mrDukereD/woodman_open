@@ -1176,11 +1176,22 @@ static std::wstring FindLockedFiles(const std::wstring& dstRoot, const std::wstr
 {
     // wood_server.exe - сервер рендера: пока он работает, копирование падает на нём посреди установки
     static const wchar_t* kFiles[] = { L"proxy.dll", L"proxy32.dll", L"bin\\main.dll", L"bin\\main32.dll", L"bin\\wood_server.exe", L"wpanel.gms" };
+    // Докер загружен в Corel (proxy занята), даже если сама proxy не меняется
+    bool corelOpen = false;
+    for (const wchar_t* px : { L"proxy.dll", L"proxy32.dll" }) {
+        HANDLE h = CreateFileW((dstRoot + L"\\" + px).c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        else if (GetLastError() == ERROR_SHARING_VIOLATION) corelOpen = true;
+    }
     std::wstring locked;
     for (const wchar_t* rel : kFiles) {
         const std::wstring p = dstRoot + L"\\" + rel;
         if (!PathFileExistsW(p.c_str())) continue;
-        if (!srcRoot.empty() && FilesIdentical(srcRoot + L"\\" + rel, p)) continue;
+        // в релизе файла нет (копировать его не будут) или он тот же - не мешает; то же правило у wood_server (willReplace)
+        if (!srcRoot.empty() && (!PathFileExistsW((srcRoot + L"\\" + rel).c_str()) || FilesIdentical(srcRoot + L"\\" + rel, p))) continue;
+        // wpanel.gms Corel держит не всё время, но при закрытии перезаписывает его своим проектом из памяти: новый gms при
+        // открытом Corel был бы молча затёрт. Меняется gms (или восстановление) и Corel открыт - считаем занятым.
+        if (corelOpen && _wcsicmp(rel, L"wpanel.gms") == 0) { locked += L"  " + std::wstring(rel) + L"\n"; continue; }
         HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); continue; }
         DWORD err = GetLastError();

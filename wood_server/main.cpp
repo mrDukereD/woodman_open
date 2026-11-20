@@ -1672,20 +1672,6 @@ static bool verifyRsaSha256Key(const unsigned char* blob, ULONG blobLen, const v
     if (hRsa) BCryptCloseAlgorithmProvider(hRsa, 0);
     return ok;
 }
-// занятые DLL докера (Corel открыт): их нельзя открыть на запись; пустая строка - свободно (как FindLockedFiles установщика)
-static wstring FindLockedFilesUpd(const wstring& wpanelRoot) {
-    static const wchar_t* kFiles[] = { L"proxy.dll", L"proxy32.dll", L"bin\\main.dll", L"bin\\main32.dll" };
-    wstring locked;
-    for (const wchar_t* rel : kFiles) {
-        wstring p = wpanelRoot + L"\\" + rel;
-        if (!exists(p)) continue;
-        HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); continue; }
-        if (GetLastError() == ERROR_SHARING_VIOLATION) locked += wstring(L"  ") + rel + L"\n";
-    }
-    return locked;
-}
-
 #include "progress_window.inc"
 
 // ---------- пакетный рендер ----------

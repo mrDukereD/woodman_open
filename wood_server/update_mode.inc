@@ -18,7 +18,9 @@
 // не отработал (код и текст - в сообщении); 65 прочее. (Код 60 "скачать не удалось" больше не используется: качает не exe.)
 #include <winhttp.h>
 #include <commctrl.h>
+#include <RestartManager.h>
 #include "miniz.h"
+#pragma comment(lib, "rstrtmgr.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "user32.lib")
@@ -229,12 +231,81 @@ static BOOL CALLBACK enumClose(HWND h, LPARAM l)
     if (pid == (DWORD)l && IsWindowVisible(h) && GetWindow(h, GW_OWNER) == nullptr) PostMessageW(h, WM_CLOSE, 0, 0);
     return TRUE;
 }
-static bool dllLocked(const wstring& addons)
+// ---------- занятые файлы ----------
+// Файлы установки, которые держат чужие процессы (Corel, сервер рендера). Список тот же, что у установщика (FindLockedFiles):
+// решаем здесь по тому же правилу, по которому установщик потом откажется ставить (код 4).
+static bool sameFileContent(const wstring& a, const wstring& b);
+static const wchar_t* kLockable[] = { L"proxy.dll", L"proxy32.dll", L"bin\\main.dll", L"bin\\main32.dll", L"bin\\wood_server.exe", L"wpanel.gms" };
+
+// Держит ли файл какой-нибудь процесс: 1 - да, 0 - нет, -1 - узнать не удалось. Основной способ - Restart Manager: видит и открытые
+// файлы, и загруженные DLL, прав администратора не требует. Открытие на запись (прежний способ) годится только запасным: wood_server
+// идёт с правами Corel, у обычного пользователя на Program Files права записи нет, и ERROR_ACCESS_DENIED приходит раньше проверки
+// занятости - любой файл выглядел свободным.
+static int fileHeld(const wstring& path, wstring* who)
 {
-    return !FindLockedFilesUpd(addons + L"\\wpanel").empty();
+    DWORD ses = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+    int r = -1;
+    if (RmStartSession(&ses, 0, key) == ERROR_SUCCESS) {
+        LPCWSTR f = path.c_str();
+        if (RmRegisterResources(ses, 1, &f, 0, nullptr, 0, nullptr) == ERROR_SUCCESS) {
+            UINT need = 0, n = 0;
+            DWORD reason = 0;
+            DWORD e = RmGetList(ses, &need, &n, nullptr, &reason);
+            if (e == ERROR_SUCCESS) r = 0;
+            else if (e == ERROR_MORE_DATA) {
+                vector<RM_PROCESS_INFO> pi(need + 4);
+                n = (UINT)pi.size();
+                if (RmGetList(ses, &need, &n, pi.data(), &reason) == ERROR_SUCCESS) {
+                    r = n > 0 ? 1 : 0;
+                    for (UINT i = 0; who && i < n; i++) *who += wstring(L" ") + pi[i].strAppName + L"(" + std::to_wstring(pi[i].Process.dwProcessId) + L")";
+                }
+            }
+        }
+        RmEndSession(ses);
+    }
+    if (r >= 0) return r;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); return 0; }
+    return GetLastError() == ERROR_SHARING_VIOLATION ? 1 : -1;
 }
-// закрыть Corel и дождаться, пока он отпустит proxy.dll/main.dll; false - не закрылся (таймаут/отмена)
-static bool closeCorel(DWORD pid, const wstring& addons, int waitSec)
+
+// файл есть и в пакете, и в установке, и отличается - установщик будет его заменять
+static bool willReplace(const wstring& root, const wstring& addons, const wchar_t* rel)
+{
+    wstring s = root + L"\\wpanel\\" + rel, d = addons + L"\\wpanel\\" + rel;
+    return exists(s) && exists(d) && !sameFileContent(s, d);
+}
+static bool isMainDll(const wchar_t* rel) { return _wcsnicmp(rel, L"bin\\main", 8) == 0; }
+
+// Что мешает установке при открытом Corel: 0 - ничего; 1 - заняты только main*.dll (их выгружает proxy, Corel можно не закрывать);
+// 2 - занято что-то ещё (wpanel.gms, proxy, wood_server.exe) или занятость не узнать - без закрытия Corel не поставить.
+// list - что занято и кем (для журнала).
+static int lockState(const wstring& root, const wstring& addons, wstring* list)
+{
+    bool main = false, other = false;
+    for (const wchar_t* rel : kLockable) {
+        if (!willReplace(root, addons, rel)) continue;
+        // wpanel.gms Corel держит не всё время, но при закрытии перезаписывает его своим проектом из памяти: новый gms при
+        // открытом Corel был бы молча затёрт старым. Меняется gms - Corel закрываем всегда, занят файл сейчас или нет.
+        if (_wcsicmp(rel, L"wpanel.gms") == 0) { if (list) *list += L" wpanel.gms[changed]"; other = true; continue; }
+        wstring who;
+        int h = fileHeld(addons + L"\\wpanel\\" + rel, &who);
+        if (h == 0) continue;
+        if (list) *list += wstring(L" ") + rel + (h < 0 ? L"[?]" : L"[" + who + L" ]");
+        if (h > 0 && isMainDll(rel)) main = true; else other = true;
+    }
+    return other ? 2 : main ? 1 : 0;
+}
+// после закрытия Corel: занят ли ещё хоть один файл, который установщик заменит (неизвестно - считаем свободным, решит установщик)
+static bool anyHeld(const wstring& root, const wstring& addons)
+{
+    for (const wchar_t* rel : kLockable)
+        if (willReplace(root, addons, rel) && fileHeld(addons + L"\\wpanel\\" + rel, nullptr) > 0) return true;
+    return false;
+}
+// закрыть Corel и дождаться, пока отпустятся файлы, которые заменит установщик; false - не закрылся (таймаут/отмена)
+static bool closeCorel(DWORD pid, const wstring& root, const wstring& addons, int waitSec)
 {
     ULONGLONG t0 = GetTickCount64();
     if (pid) {
@@ -252,8 +323,13 @@ static bool closeCorel(DWORD pid, const wstring& addons, int waitSec)
         }
     }
     status(tr(T_FREE));
-    while (dllLocked(addons)) {
-        if (g_cancel || GetTickCount64() - t0 > (ULONGLONG)(waitSec + 60) * 1000) return false;
+    while (anyHeld(root, addons)) {
+        if (g_cancel || GetTickCount64() - t0 > (ULONGLONG)(waitSec + 60) * 1000) {
+            wstring list;
+            lockState(root, addons, &list);
+            ulog(L"files still in use after Corel closed:" + list);
+            return false;
+        }
         Sleep(300);
     }
     return true;
@@ -281,34 +357,24 @@ static bool proxySame(const wstring& root, const wstring& addons)
     }
     return compared;
 }
-// main.dll/main32.dll пакета отличаются от установленных И сейчас заняты (то есть нужна выгрузка)
-static bool mainNeedsUnload(const wstring& root, const wstring& addons)
-{
-    const wchar_t* names[] = { L"bin\\main.dll", L"bin\\main32.dll" };
-    for (const wchar_t* n : names) {
-        wstring s = root + L"\\wpanel\\" + n, d = addons + L"\\wpanel\\" + n;
-        if (!exists(s) || !exists(d)) continue;
-        HANDLE h = CreateFileW(d.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); continue; }
-        if (GetLastError() == ERROR_SHARING_VIOLATION && !sameFileContent(s, d)) return true;
-    }
-    return false;
-}
 static wstring workFile(const wstring& work, const wchar_t* name)
 {
     wstring w = work;
     while (!w.empty() && (w.back() == L'\\' || w.back() == L'/')) w.pop_back();
     return w + L"\\" + name;
 }
-// ждём до sec секунд, пока proxy выгрузит main.dll; true - освободилась
+// ждём до sec секунд, пока proxy выгрузит main.dll; true - мешать установке больше нечему (lockState = 0)
 static bool waitMainFree(const wstring& root, const wstring& addons, int sec)
 {
     ULONGLONG t0 = GetTickCount64();
-    while (mainNeedsUnload(root, addons)) {
-        if (g_cancel || GetTickCount64() - t0 > (ULONGLONG)sec * 1000) return false;
+    for (;;) {
+        wstring list;
+        int st = lockState(root, addons, &list);
+        if (st == 0) return true;
+        if (st == 2) { ulog(L"in use besides main.dll:" + list); return false; }
+        if (g_cancel || GetTickCount64() - t0 > (ULONGLONG)sec * 1000) { ulog(L"main.dll still loaded:" + list); return false; }
         Sleep(300);
     }
-    return true;
 }
 
 static void stopViewerServer(const wstring& work)
@@ -326,7 +392,9 @@ static bool runInstaller(const wstring& pkg, const wstring& addons, const wstrin
 {
     wstring result = tmp + L"\\installer_result.txt";
     DeleteFileW(result.c_str());
-    wstring args = L"--silent --kind update --target \"" + addons + L"\" --result \"" + result + L"\" --log \"" + tmp + L"\\installer.log\" --wait-locked 30" +
+    // --no-prompt: занятые файлы - сразу код 4, без окна "закройте Corel и нажмите Повторить" (оно выскакивало из скрытого процесса
+    // администратора, терялось за окнами, и обновление висело до таймаута). На код 4 doUpdate сам закрывает Corel и повторяет.
+    wstring args = L"--silent --no-prompt --kind update --target \"" + addons + L"\" --result \"" + result + L"\" --log \"" + tmp + L"\\installer.log\" --wait-locked 30" +
                    (extra.empty() ? L"" : L" " + extra);
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof sei;
@@ -337,13 +405,15 @@ static bool runInstaller(const wstring& pkg, const wstring& addons, const wstrin
     sei.lpDirectory = pkg.c_str();
     sei.nShow = SW_HIDE;
     if (!ShellExecuteExW(&sei) || !sei.hProcess) { *code = (GetLastError() == ERROR_CANCELLED) ? -1 : -2; return false; }
-    WaitForSingleObject(sei.hProcess, 30 * 60 * 1000);
+    bool timedOut = WaitForSingleObject(sei.hProcess, 30 * 60 * 1000) == WAIT_TIMEOUT;
     DWORD ec = 99;
     GetExitCodeProcess(sei.hProcess, &ec);
     CloseHandle(sei.hProcess);
+    if (timedOut) ec = 98;
     *code = (int)ec;
     string r;
     if (readFile(result, r, 65536)) *text = toWide(r);
+    else if (timedOut) *text = L"installer did not finish in 30 min";
     return ec == 0;
 }
 
@@ -378,6 +448,17 @@ static void clearStage(const wstring& dir)
     const wchar_t* names[] = { L"meta.txt", L"update.zip", L"update.sig", L"update.zip.part" };
     for (const wchar_t* n : names) DeleteFileW((dir + L"\\" + n).c_str());
     RemoveDirectoryW(dir.c_str());
+}
+
+// Согласие на закрытие Corel (--no-ui: стенды, без вопроса). false - пользователь отказался.
+static bool confirmCloseCorel(const Args& a)
+{
+    if (g_noUi || !a.corelPid) return true;
+    HANDLE hc = OpenProcess(SYNCHRONIZE, FALSE, a.corelPid);
+    if (!hc) return true;
+    bool alive = WaitForSingleObject(hc, 0) == WAIT_TIMEOUT;
+    CloseHandle(hc);
+    return !alive || askUser(tr(Q_CLOSE), tr(Q_CLOSE_Y), tr(Q_CLOSE_N), MB_ICONQUESTION);
 }
 
 // основная работа (в рабочем потоке или синхронно при --no-ui); возвращает код выхода
@@ -432,27 +513,36 @@ static int doUpdate(const Args& a, wstring* errText)
     progress(78);
     stopViewerServer(a.work);
     if (a.corelPid && !a.work.empty() && proxySame(root, a.addons)) {
-        if (mainNeedsUnload(root, a.addons)) {
+        // Corel можно не закрывать, только если установке мешает разве что main.dll (её выгружает proxy). wpanel.gms, занятый
+        // wood_server.exe или неизвестная занятость - закрываем Corel сразу, иначе установщик упрётся в них (код 4).
+        wstring list;
+        int st = lockState(root, a.addons, &list);
+        if (st == 1) {
             status(tr(T_UNLOAD));
             keepCorel = waitMainFree(root, a.addons, a.unloadTimeout);
             ulog(keepCorel ? L"main.dll unloaded by proxy, Corel stays open" : L"main.dll was not unloaded, closing Corel");
-        } else { keepCorel = true; ulog(L"proxy/main unchanged or free, Corel stays open"); }
+        } else if (st == 0) { keepCorel = true; ulog(L"nothing to replace is in use, Corel stays open"); }
+        else ulog(L"in use (needs Corel closed):" + list);
     }
-    if (!keepCorel && !g_noUi && a.corelPid) {                // Corel закрываем только с согласия пользователя (--no-ui: стенды, как раньше)
-        HANDLE hc = OpenProcess(SYNCHRONIZE, FALSE, a.corelPid);
-        if (hc) {
-            bool alive = WaitForSingleObject(hc, 0) == WAIT_TIMEOUT;
-            CloseHandle(hc);
-            if (alive && !askUser(tr(Q_CLOSE), tr(Q_CLOSE_Y), tr(Q_CLOSE_N), MB_ICONQUESTION)) { *errText = tr(E_NOCLOSE); rc = 63; goto done; }
-        }
-    }
-    if (!keepCorel && !closeCorel(a.corelPid, a.addons, a.closeTimeout)) { *errText = tr(E_CLOSE); rc = 63; goto done; }
+    if (!keepCorel && !confirmCloseCorel(a)) { *errText = tr(E_NOCLOSE); rc = 63; goto done; }
+    if (!keepCorel && !closeCorel(a.corelPid, root, a.addons, a.closeTimeout)) { *errText = tr(E_CLOSE); rc = 63; goto done; }
 
     {
         status(tr(T_INST)); progress(85);
         int ic = 0; wstring itext;
         bool ok = runInstaller(root, a.addons, tmp, a.installerExtra, &ic, &itext);
         ulog(L"installer: code " + std::to_wstring(ic) + L" ok=" + (ok ? L"1" : L"0") + L" " + itext);
+        if (!ok && ic == 4 && keepCorel && a.corelPid) {
+            // Corel оставили открытым, а установщик всё же нашёл занятые файлы (ничего не тронуто): закрываем Corel и ставим ещё раз
+            ulog(L"installer: files in use with Corel open, closing Corel and retrying");
+            keepCorel = false;
+            if (!confirmCloseCorel(a)) { *errText = tr(E_NOCLOSE); rc = 63; goto done; }
+            if (!closeCorel(a.corelPid, root, a.addons, a.closeTimeout)) { *errText = tr(E_CLOSE); rc = 63; goto done; }
+            status(tr(T_INST));
+            itext.clear();
+            ok = runInstaller(root, a.addons, tmp, a.installerExtra, &ic, &itext);
+            ulog(L"installer (retry): code " + std::to_wstring(ic) + L" ok=" + (ok ? L"1" : L"0") + L" " + itext);
+        }
         if (!ok) {
             if (ic == -1) *errText = tr(E_UAC);
             else {
@@ -564,6 +654,7 @@ static int run(int argc, wchar_t** argv)
         else if (k == L"--keep-temp") a.keepTemp = true;
         else if (k == L"--from-stage") { }                      // единственный режим; ключ оставлен: его по-прежнему передаёт main.dll
         else if (k == L"--stage-dir") next(a.stageDir);
+        else if (k == L"--installer-extra") next(a.installerExtra);   // стенды: --no-registry, свои папки копий и настроек
     }
     g_ru = !(lang.size() >= 2 && (lang.compare(0, 2, L"en") == 0 || lang.compare(0, 2, L"de") == 0 || lang.compare(0, 2, L"es") == 0 || lang.compare(0, 2, L"pt") == 0 || lang.compare(0, 2, L"tr") == 0 || lang.compare(0, 2, L"zh") == 0 || lang.compare(0, 2, L"ar") == 0));
     g_noUi = noUi;
