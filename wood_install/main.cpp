@@ -115,12 +115,19 @@ static std::wstring g_logPath;                 // --log: свой файл жу�
 static void LogLine(const std::wstring& s)
 {
     const std::wstring logPath = g_logPath.empty() ? GetExeDir() + L"\\wpanel_installer.log" : g_logPath;
-    std::wofstream f(logPath.c_str(), std::ios::app);
-    if (!f) return;
     SYSTEMTIME st{}; GetLocalTime(&st);
-    f << L"[" << st.wYear << L"-" << st.wMonth << L"-" << st.wDay
-        << L" " << st.wHour << L":" << st.wMinute << L":" << st.wSecond << L"] "
-        << s << L"\n";
+    // UTF-8: раньше был std::wofstream, и русский текст (его теперь отдаёт локализация)
+    // обрывался на первом не-ASCII символе - в журнале оставался пустой хвост строки.
+    wchar_t ts[48];
+    swprintf(ts, 48, L"[%04d-%02d-%02d %02d:%02d:%02d] ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    const std::wstring line = std::wstring(ts) + s + L"\n";
+    int n = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return;
+    std::string u(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), &u[0], n, nullptr, nullptr);
+    std::ofstream f(logPath.c_str(), std::ios::app | std::ios::binary);
+    if (!f) return;
+    f.write(u.data(), (std::streamsize)u.size());
 }
 
 static std::wstring GetProgramFiles64Path()
@@ -266,6 +273,7 @@ static std::wstring GetAppData()
 // Built-in English defaults (fallback)
 static std::map<std::wstring, std::wstring> g_en = {
     {L"Title", L"Woodman Docker"},
+    {L"TitleSuffix", L" - Installation"},
     {L"FoundVersions", L"Detected CorelDRAW Addons folders:"},
     {L"NotFound", L"(CorelDRAW not found)"},
     {L"InstallButton", L"Install"},
@@ -317,6 +325,22 @@ static std::map<std::wstring, std::wstring> g_en = {
     {L"HintRestoreSettings", L"Restore WPanel from a backup (the installer makes them on every install and cleanup). By default everything in the backup is restored; tick Only settings to restore just the settings. CorelDRAW must be closed."},
     {L"HintFullCleanup", L"Remove WPanel and old settings from the selected folder (with a backup). Use before a clean reinstall."},
     {L"HintCorelTweak", L"Tune CorelDRAW for the docker: autosave every 3 minutes, more undo levels, fewer extra dialogs."},
+    // тихий режим (--silent, обновление из Corel): итог уходит в окно updater
+    {L"HeadlessNoTarget", L"--target is required"},
+    {L"FilesInUseShort", L"These files are in use by another program: {0}"},
+    {L"CannotCreateBackup", L"Cannot create backup."},
+    {L"CopyFailedRolled", L"Copy failed (previous version restored)."},
+    {L"CopyFailed", L"Copy failed."},
+    {L"CannotCreateBackupFolder", L"Cannot create backup folder."},
+    {L"CorelTweaksNoVersion", L"Cannot apply tweaks: CorelDRAW version is unknown."},
+    {L"CorelTweaksDone", L"Corel tweaks applied successfully!"},
+    // восстановление из копии (тихий режим отдаёт текст в --result)
+    {L"RestoreBackupNotFound", L"Backup not found or empty."},
+    {L"RestoreNothing", L"Nothing to restore (no settings in this backup)."},
+    {L"RestoreNoCurrentCopy", L"Cannot back up the current state."},
+    {L"RestoreCannotClear", L"Cannot clear {0}."},
+    {L"RestoreCopyWpanel", L"Copy failed: wpanel."},
+    {L"RestoreCopySettings", L"Copy failed: settings."},
 };
 
 static std::map<std::wstring, std::wstring> g_inst; // current language dictionary
@@ -883,7 +907,7 @@ static std::wstring SettingsPath()
 
 static void UpdateWindowTitle(HWND hDlg)
 {
-    std::wstring title = T(L"Title") + L" v" + g_version + L" - Installation";
+    std::wstring title = T(L"Title") + L" v" + g_version + T(L"TitleSuffix");
     SetWindowTextW(hDlg, title.c_str());
 }
 
@@ -1118,7 +1142,7 @@ static void ApplyCorelTweaks(HWND hDlg, int corelVer)
     SetBrowserEmulation();
 
     if (corelVer <= 0) {
-        ShowMsg(hDlg, L"Cannot apply tweaks: CorelDRAW version is unknown.", MB_ICONWARNING);
+        ShowMsg(hDlg, T(L"CorelTweaksNoVersion"), MB_ICONWARNING);
         LogLine(L"INFO: ApplyCorelTweaks - Version unknown, only browser emulation applied.");
         return;
     }
@@ -1166,7 +1190,7 @@ static void ApplyCorelTweaks(HWND hDlg, int corelVer)
     }
 
     LogLine(L"INFO: ApplyCorelTweaks - Completed for v" + std::to_wstring(corelVer));
-    ShowMsg(hDlg, L"Corel tweaks applied successfully!", MB_ICONINFORMATION);
+    ShowMsg(hDlg, T(L"CorelTweaksDone"), MB_ICONINFORMATION);
 }
 
 // ---------------- Install / Cleanup ----------------
@@ -1443,30 +1467,46 @@ static int MakeBackup(const std::wstring& kind, const std::wstring& addonsPath, 
 static int RestoreBackup(const std::wstring& backupDir, const std::wstring& addonsPath, bool onlySettings, std::wstring* err)
 {
     BackupInfo bi;
-    if (!LoadBackupInfo(backupDir, bi)) { if (err) *err = L"backup not found or empty"; return 9; }
+    if (!LoadBackupInfo(backupDir, bi)) { if (err) *err = T(L"RestoreBackupNotFound"); return 9; }
     const bool doWp = bi.hasWpanel && !onlySettings;
     const bool doSt = bi.hasSettings;
-    if (!doWp && !doSt) { if (err) *err = L"nothing to restore (no settings in this backup)"; return 9; }
+    if (!doWp && !doSt) { if (err) *err = T(L"RestoreNothing"); return 9; }
     const std::wstring wp = addonsPath + L"\\wpanel";
     // Занятые DLL = Corel открыт: он держит файлы докера и перезапишет настройки при закрытии.
     if (!addonsPath.empty()) {
         std::wstring locked = FindLockedFiles(wp);
-        if (!locked.empty()) { if (err) *err = L"files in use:\n" + locked; return 4; }
+        if (!locked.empty()) {
+            if (err) {
+                std::wstring msg = T(L"FilesInUseShort");
+                size_t p = msg.find(L"{0}");
+                if (p != std::wstring::npos) msg.replace(p, 3, locked);
+                *err = msg;
+            }
+            return 4;
+        }
     }
     std::wstring pre;
     int b = MakeBackup(L"before_restore", addonsPath, doSt, bi.label, L"", &pre, doWp);
-    if (b < 0) { if (err) *err = L"cannot back up the current state"; return 5; }
+    if (b < 0) { if (err) *err = T(L"RestoreNoCurrentCopy"); return 5; }
 
     if (doWp) {
         DeleteIfExists(wp);
-        if (PathFileExistsW(wp.c_str())) { if (err) *err = L"cannot clear " + wp; return 8; }
-        if (!CopyDirRecursive(bi.dir + L"\\wpanel", wp)) { if (err) *err = L"copy failed: wpanel"; return 8; }
+        if (PathFileExistsW(wp.c_str())) {
+            if (err) {
+                std::wstring msg = T(L"RestoreCannotClear");
+                size_t p = msg.find(L"{0}");
+                if (p != std::wstring::npos) msg.replace(p, 3, wp);
+                *err = msg;
+            }
+            return 8;
+        }
+        if (!CopyDirRecursive(bi.dir + L"\\wpanel", wp)) { if (err) *err = T(L"RestoreCopyWpanel"); return 8; }
     }
     if (doSt) {
         const std::wstring st = SettingsPath();
         if (!st.empty()) {
             DeleteIfExists(st);
-            if (!CopyDirRecursive(bi.dir + L"\\settings", st)) { if (err) *err = L"copy failed: settings"; return 8; }
+            if (!CopyDirRecursive(bi.dir + L"\\settings", st)) { if (err) *err = T(L"RestoreCopySettings"); return 8; }
         }
     }
     LogLine(L"Restored from " + backupDir + (pre.empty() ? L"" : L" (current saved to " + pre + L")"));
@@ -1617,7 +1657,7 @@ static bool DoInstall(HWND hDlg)
         return false;
     }
     if (rc != 0) {
-        std::wstring what = rc == 5 ? L"Cannot create backup." : rc == 6 ? L"Copy failed (previous version restored)." : L"Copy failed.";
+        std::wstring what = rc == 5 ? T(L"CannotCreateBackup") : rc == 6 ? T(L"CopyFailedRolled") : T(L"CopyFailed");
         ShowMsg(hDlg, std::wstring(T(L"Error")) + L" " + what, MB_ICONERROR);
         return false;
     }
@@ -1656,7 +1696,7 @@ static bool DoFullCleanup(HWND hDlg)
     int b = MakeBackup(L"cleanup", it.addonsPath, true, it.label, L"", &bdir);
     if (b < 0) {
         LogLine(L"ERROR: Cleanup - backup failed, nothing deleted");
-        ShowMsg(hDlg, std::wstring(T(L"Error")) + L" " + std::wstring(L"Cannot create backup folder."), MB_ICONERROR);
+        ShowMsg(hDlg, std::wstring(T(L"Error")) + L" " + T(L"CannotCreateBackupFolder"), MB_ICONERROR);
         return false;
     }
 
@@ -1679,14 +1719,14 @@ static bool DoFullCleanup(HWND hDlg)
 
 // ---------------- Тихий режим (без окон) ----------------
 //   wood_install.exe --silent --target "<...\Addons>" [--backup-root D] [--keep N] [--no-registry] [--wait-locked сек]
-//                    [--kind update] [--result файл] [--log файл] [--settings-dir D]
+//                    [--kind update] [--result файл] [--log файл] [--settings-dir D] [--lang ru]
 //   wood_install.exe --restore "<папка копии>" --target "<...\Addons>" [--result файл] ...
 // Коды: 0 ок; 2 неверные аргументы; 3 нет wpanel рядом с установщиком; 4 DLL заняты; 5 копия не вышла;
 // 6 сбой копирования, откат выполнен; 7 сбой, откат не вышел; 8 сбой восстановления; 9 копия негодная.
 // --result: файл с одной строкой "OK" или "ERR <код> <текст>" (читает updater).
 static int RunHeadless(int argc, wchar_t** argv)
 {
-    std::wstring target, restoreDir, resultFile;
+    std::wstring target, restoreDir, resultFile, langArg;
     bool onlySettings = false;
     InstallOpts o;
     o.kind = L"update";
@@ -1695,6 +1735,7 @@ static int RunHeadless(int argc, wchar_t** argv)
         auto next = [&](std::wstring& dst) { if (i + 1 < argc) dst = argv[++i]; };
         std::wstring v;
         if (a == L"--target") next(target);
+        else if (a == L"--lang") next(langArg);
         else if (a == L"--restore") next(restoreDir);
         else if (a == L"--backup-root") next(g_backupRootOverride);
         else if (a == L"--keep") { next(v); o.keep = _wtoi(v.c_str()); }
@@ -1713,7 +1754,18 @@ static int RunHeadless(int argc, wchar_t** argv)
         return code;
     };
     LogLine(L"--- Start (headless) ---");
-    if (target.empty() && !(onlySettings && !restoreDir.empty())) return finish(2, L"--target is required");
+    // Тихий режим раньше не читал словари и говорил по-английски (окно "файлы заняты" и итог для updater).
+    // Язык: --lang от updater, иначе сохранённый в установщике, иначе системный. Тексты - inst[] из wpanel\langs\*.js.
+    g_langFiles = ScanLangFiles();
+    {
+        std::wstring want = langArg;
+        if (want.empty()) want = LoadSavedLangCode();
+        if (want.empty()) want = GetSystemIsoLang2();
+        int idx = FindLangIndexByCode(want);
+        LoadLanguageByIndex(idx);
+        LogLine(L"Language: " + (idx >= 0 ? g_langFiles[idx].code : std::wstring(L"en (built-in)")));
+    }
+    if (target.empty() && !(onlySettings && !restoreDir.empty())) return finish(2, T(L"HeadlessNoTarget"));
     while (target.size() > 3 && (target.back() == L'\\' || target.back() == L'/')) target.pop_back();
 
     if (!restoreDir.empty()) {
@@ -1724,7 +1776,27 @@ static int RunHeadless(int argc, wchar_t** argv)
     g_version = ReadVersionFromSysJs();
     std::wstring locked;
     int rc = InstallCore(target, o, &locked, nullptr);
-    return finish(rc, rc == 4 ? L"files in use: " + locked : L"");
+    std::wstring msg;
+    if (rc == 4) {
+        msg = T(L"FilesInUseShort");
+        size_t p = msg.find(L"{0}");
+        if (p != std::wstring::npos) {
+            // "  wpanel.gms\n" из FindLockedFiles -> "wpanel.gms, ..." одной строкой для окна updater
+            std::wstring list;
+            size_t i = 0;
+            while (i <= locked.size()) {
+                size_t e = locked.find(L'\n', i);
+                if (e == std::wstring::npos) e = locked.size();
+                size_t a = i, b = e;
+                while (a < b && (locked[a] == L' ' || locked[a] == L'\t' || locked[a] == L'\r')) a++;
+                while (b > a && (locked[b - 1] == L' ' || locked[b - 1] == L'\t' || locked[b - 1] == L'\r')) b--;
+                if (b > a) { if (!list.empty()) list += L", "; list += locked.substr(a, b - a); }
+                i = e + 1;
+            }
+            msg.replace(p, 3, list);
+        }
+    }
+    return finish(rc, msg);
 }
 
 static void DeleteSelectedCustomPath(HWND hDlg, int sel)
@@ -2124,7 +2196,7 @@ static INT_PTR CALLBACK DlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lPara
             HWND hList = GetDlgItem(hDlg, IDC_LIST_PATHS);
             int sel = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
             if (sel == LB_ERR || sel < 0 || sel >= (int)g_found.size()) {
-                ShowMsg(hDlg, L"Please select a CorelDRAW version first.", MB_ICONWARNING);
+                ShowMsg(hDlg, T(L"SelectCorel"), MB_ICONWARNING);
                 return TRUE;
             }
             

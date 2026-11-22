@@ -29,37 +29,80 @@
 
 namespace upd {
 
-// ---------- тексты (ru/en) ----------
-static bool g_ru = true;
-struct Tx { const wchar_t* ru; const wchar_t* en; };
-static const Tx T_TITLE   = { L"Обновление Woodman Docker", L"Woodman Docker update" };
-static const Tx T_DOWN    = { L"Скачивание обновления...", L"Downloading the update..." };
-static const Tx T_SIG     = { L"Проверка подписи...", L"Checking the signature..." };
-static const Tx T_UNPACK  = { L"Распаковка...", L"Unpacking..." };
-static const Tx T_CLOSE   = { L"Закройте CorelDRAW (он предложит сохранить файлы)...", L"Please close CorelDRAW (it will offer to save your files)..." };
-static const Tx T_UNLOAD  = { L"Выгрузка модуля докера (CorelDRAW закрывать не нужно)...", L"Unloading the docker module (CorelDRAW stays open)..." };
-static const Tx T_FREE    = { L"Ожидание, пока CorelDRAW отпустит файлы...", L"Waiting for CorelDRAW to release its files..." };
-static const Tx T_INST    = { L"Установка обновления...", L"Installing the update..." };
-static const Tx T_START   = { L"Запуск CorelDRAW...", L"Starting CorelDRAW..." };
-static const Tx Q_CLOSE   = { L"Для обновления нужно закрыть CorelDRAW. Он сам предложит сохранить открытые файлы.\nЗакрыть CorelDRAW сейчас?", L"The update needs CorelDRAW to be closed. It will offer to save your open files.\nClose CorelDRAW now?" };
-static const Tx Q_CLOSE_Y = { L"Закрыть CorelDRAW", L"Close CorelDRAW" };
-static const Tx Q_CLOSE_N = { L"Отмена", L"Cancel" };
-static const Tx Q_DONE_OK = { L"Обновление установлено.", L"The update is installed." };
-static const Tx Q_DONE_ER = { L"Обновление не установлено (подробности в журнале).", L"The update was not installed (see the log)." };
-static const Tx Q_RUN_Y   = { L"Запустить CorelDRAW", L"Run CorelDRAW" };
-static const Tx Q_RUN_N   = { L"Закончить", L"Finish" };
-static const Tx E_NOCLOSE = { L"Обновление отложено: CorelDRAW не закрыт. Ничего не изменено.", L"The update was postponed: CorelDRAW was not closed. Nothing was changed." };
-static const Tx T_DONE    = { L"Готово.", L"Done." };
-static const Tx T_CANCEL  = { L"Отмена", L"Cancel" };
-static const Tx E_DOWN    = { L"Не удалось скачать обновление. Проверьте интернет и попробуйте позже.", L"Could not download the update. Check your internet connection and try again." };
-static const Tx E_SIG     = { L"Подпись обновления неверна. Установка отменена, ничего не изменено.", L"The update signature is invalid. Installation cancelled, nothing was changed." };
-static const Tx E_PKG     = { L"Архив обновления повреждён или неполный. Ничего не изменено.", L"The update archive is damaged or incomplete. Nothing was changed." };
-static const Tx E_AV      = { L"Файл обновления не найден: скорее всего, его забрал антивирус. Поищите его в карантине антивируса (wood_server.exe, wood_install.exe), восстановите, добавьте в исключения и повторите. Ничего не изменено.", L"An update file was not found: most likely your antivirus took it. Look for it in the antivirus quarantine (wood_server.exe, wood_install.exe), restore it, add it to the exclusions and try again. Nothing was changed." };
-static const Tx E_CLOSE   = { L"CorelDRAW не закрылся. Обновление отменено, ничего не изменено.", L"CorelDRAW did not close. The update was cancelled, nothing was changed." };
-static const Tx E_INST    = { L"Установщик не смог обновить докер", L"The installer could not update the docker" };
-static const Tx E_ROLLED  = { L"Прежняя версия возвращена.", L"The previous version was restored." };
-static const Tx E_UAC     = { L"Установка отменена (нет разрешения администратора).", L"Installation cancelled (administrator permission was not granted)." };
-static const wchar_t* tr(const Tx& t) { return g_ru ? t.ru : t.en; }
+// ---------- тексты окна: из локали панели (ключи upd_* в wpanel\langs\<код>.js) ----------
+// Читаются из update.zip до показа окна: там локаль НОВОЙ версии, поэтому при первом обновлении окно уже
+// переведено (у установленной панели этих ключей ещё нет). Подпись архива проверяет doUpdate перед установкой -
+// до неё из архива берутся только строки окна, не код. Английский фолбэк - на случай, если архив/локаль не читаются.
+// Остальные языки заполняет wpl.py из ru.js.
+static wstring g_langCode = L"ru";      // язык панели: из него берётся локаль окна и он же уходит установщику
+static std::map<wstring, wstring> g_txt;
+
+static const wchar_t* T_TITLE   = L"upd_title";
+static const wchar_t* T_SIG     = L"upd_checking_sig";
+static const wchar_t* T_UNPACK  = L"upd_unpacking";
+static const wchar_t* T_CLOSE   = L"upd_close_corel";
+static const wchar_t* T_UNLOAD  = L"upd_unloading";
+static const wchar_t* T_FREE    = L"upd_wait_files";
+static const wchar_t* T_INST    = L"upd_installing";
+static const wchar_t* T_START   = L"upd_starting_corel";
+static const wchar_t* T_DONE    = L"upd_done";
+static const wchar_t* T_CANCEL  = L"upd_cancel";
+static const wchar_t* Q_CLOSE   = L"upd_q_close";
+static const wchar_t* Q_CLOSE_Y = L"upd_q_close_yes";
+static const wchar_t* Q_CLOSE_N = L"upd_q_close_no";
+static const wchar_t* Q_DONE_OK = L"upd_q_done_ok";
+static const wchar_t* Q_DONE_ER = L"upd_q_done_err";
+static const wchar_t* Q_RUN_Y   = L"upd_q_run_yes";
+static const wchar_t* Q_RUN_N   = L"upd_q_run_no";
+static const wchar_t* E_NOCLOSE = L"upd_e_noclose";
+static const wchar_t* E_SIG     = L"upd_e_signature";
+static const wchar_t* E_PKG     = L"upd_e_package";
+static const wchar_t* E_AV      = L"upd_e_antivirus";
+static const wchar_t* E_MISSING = L"upd_e_missing";
+static const wchar_t* E_CLOSE   = L"upd_e_corel_close";
+static const wchar_t* E_INST    = L"upd_e_install_code";
+static const wchar_t* E_ROLLED  = L"upd_e_rolled_back";
+static const wchar_t* E_UAC     = L"upd_e_uac";
+static const wchar_t* E_TIMEOUT = L"upd_e_timeout";
+
+struct TxtEn { const wchar_t* key; const wchar_t* en; };
+static const TxtEn kTxtEn[] = {
+    {L"upd_title", L"Woodman Docker update"},
+    {L"upd_checking_sig", L"Checking the signature..."},
+    {L"upd_unpacking", L"Unpacking..."},
+    {L"upd_close_corel", L"Please close CorelDRAW (it will offer to save your files)..."},
+    {L"upd_unloading", L"Unloading the docker module (CorelDRAW stays open)..."},
+    {L"upd_wait_files", L"Waiting for CorelDRAW to release its files..."},
+    {L"upd_installing", L"Installing the update..."},
+    {L"upd_starting_corel", L"Starting CorelDRAW..."},
+    {L"upd_done", L"Done."},
+    {L"upd_cancel", L"Cancel"},
+    {L"upd_q_close", L"The update needs CorelDRAW to be closed. It will offer to save your open files.\nClose CorelDRAW now?"},
+    {L"upd_q_close_yes", L"Close CorelDRAW"},
+    {L"upd_q_close_no", L"Cancel"},
+    {L"upd_q_done_ok", L"The update is installed."},
+    {L"upd_q_done_err", L"The update was not installed (see the log)."},
+    {L"upd_q_run_yes", L"Run CorelDRAW"},
+    {L"upd_q_run_no", L"Finish"},
+    {L"upd_e_noclose", L"The update was postponed: CorelDRAW was not closed. Nothing was changed."},
+    {L"upd_e_signature", L"The update signature is invalid. Installation cancelled, nothing was changed."},
+    {L"upd_e_package", L"The update archive is damaged or incomplete. Nothing was changed."},
+    {L"upd_e_antivirus", L"An update file was not found: most likely your antivirus took it. Look for it in the antivirus quarantine (wood_server.exe, wood_install.exe), restore it, add it to the exclusions and try again. Nothing was changed."},
+    {L"upd_e_missing", L"The update package is missing a required file: {0}"},
+    {L"upd_e_corel_close", L"CorelDRAW did not close. The update was cancelled, nothing was changed."},
+    {L"upd_e_install_code", L"The installer could not update the docker (code {0})."},
+    {L"upd_e_rolled_back", L"The previous version was restored."},
+    {L"upd_e_uac", L"Installation cancelled (administrator permission was not granted)."},
+    {L"upd_e_timeout", L"The installer did not finish within 30 minutes."},
+};
+
+static wstring tr(const wchar_t* key)
+{
+    auto it = g_txt.find(key);
+    if (it != g_txt.end()) return it->second;
+    for (const TxtEn& e : kTxtEn) if (wcscmp(e.key, key) == 0) return e.en;
+    return key;
+}
 
 // Вопрос пользователю с двумя своими подписями кнопок (MessageBox их не умеет: подписи подменяет CBT-хук). Да -> true.
 static HHOOK g_askHook = nullptr;
@@ -75,11 +118,12 @@ static LRESULT CALLBACK askHookProc(int code, WPARAM w, LPARAM l)
     }
     return CallNextHookEx(g_askHook, code, w, l);
 }
-static bool askUser(const wchar_t* text, const wchar_t* yes, const wchar_t* no, UINT icon)
+static bool askUser(const wstring& text, const wstring& yes, const wstring& no, UINT icon)
 {
-    g_askYes = yes; g_askNo = no;
+    g_askYes = yes.c_str(); g_askNo = no.c_str();
+    wstring title = tr(T_TITLE);
     g_askHook = SetWindowsHookExW(WH_CBT, askHookProc, nullptr, GetCurrentThreadId());
-    int r = MessageBoxW(nullptr, text, tr(T_TITLE), MB_YESNO | icon | MB_TOPMOST | MB_SETFOREGROUND);
+    int r = MessageBoxW(nullptr, text.c_str(), title.c_str(), MB_YESNO | icon | MB_TOPMOST | MB_SETFOREGROUND);
     if (g_askHook) { UnhookWindowsHookEx(g_askHook); g_askHook = nullptr; }
     return r == IDYES;
 }
@@ -218,6 +262,86 @@ static bool extractZip(const string& zipData, const wstring& dest, string* err)
         else setArchiveTime(out, fs.m_time);
         if (p) mz_free(p);
         progress(60 + (int)(15 * (i + 1) / n));
+    }
+    mz_zip_reader_end(&z);
+    return ok;
+}
+
+// ---------- тексты окна из локали панели (wpanel\langs\<код>.js, ключи upd_*) ----------
+// Строки вида: lang['upd_key'] = "...";
+static void parseUiTxt(const wstring& js)
+{
+    size_t pos = 0;
+    while (pos < js.size()) {
+        size_t eol = js.find(L'\n', pos);
+        if (eol == wstring::npos) eol = js.size();
+        wstring line = js.substr(pos, eol - pos);
+        pos = eol + 1;
+        size_t s = 0;
+        while (s < line.size() && (line[s] == L' ' || line[s] == L'\t' || line[s] == L'\r')) s++;
+        if (line.compare(s, 10, L"lang['upd_") != 0) continue;      // "lang['upd_" = 10 символов
+        size_t k2 = line.find(L"']", s + 6);                        // "lang['" = 6
+        if (k2 == wstring::npos) continue;
+        wstring key = line.substr(s + 6, k2 - (s + 6));
+        size_t eq = line.find(L'=', k2);
+        if (eq == wstring::npos) continue;
+        size_t q1 = line.find_first_of(L"\"'", eq);
+        if (q1 == wstring::npos) continue;
+        wchar_t q = line[q1];
+        wstring val;
+        bool esc = false;
+        for (size_t i = q1 + 1; i < line.size(); i++) {
+            wchar_t c = line[i];
+            if (esc) {
+                esc = false;
+                if (c == L'n') val.push_back(L'\n');
+                else if (c == L'r') val.push_back(L'\r');
+                else if (c == L't') val.push_back(L'\t');
+                else val.push_back(c);
+            }
+            else if (c == L'\\') esc = true;
+            else if (c == q) break;
+            else val.push_back(c);
+        }
+        g_txt[key] = val;
+    }
+}
+
+// Достаёт wpanel/langs/<код>.js прямо из архива обновления (без распаковки на диск) и заполняет g_txt.
+static bool loadUiTxt(const wstring& zipPath)
+{
+    string data;
+    if (!readFile(zipPath, data, 512ULL << 20)) return false;
+    mz_zip_archive z;
+    memset(&z, 0, sizeof z);
+    if (!mz_zip_reader_init_mem(&z, data.data(), data.size(), 0)) return false;
+    wstring want = L"/wpanel/langs/" + g_langCode + L".js";
+    bool ok = false;
+    mz_uint n = mz_zip_reader_get_num_files(&z);
+    // язык панели, а если его файла в архиве нет - английский из того же архива (встроенный фолбэк - последний)
+    for (int pass = 0; pass < 2 && !ok; pass++) {
+        if (pass == 1) {
+            if (g_langCode == L"en") break;
+            want = L"/wpanel/langs/en.js";
+        }
+        for (mz_uint i = 0; i < n; i++) {
+            mz_zip_archive_file_stat fs;
+            if (!mz_zip_reader_file_stat(&z, i, &fs)) break;
+            string raw = fs.m_filename;
+            wstring name = (fs.m_bit_flag & (1 << 11)) ? toWide(raw) : [&]() {
+                int len = MultiByteToWideChar(CP_OEMCP, 0, raw.c_str(), (int)raw.size(), nullptr, 0);
+                wstring w(len, L'\0');
+                MultiByteToWideChar(CP_OEMCP, 0, raw.c_str(), (int)raw.size(), &w[0], len);
+                return w;
+            }();
+            for (wchar_t& c : name) if (c == L'\\') c = L'/';
+            if (name.size() < want.size() || _wcsicmp(name.c_str() + name.size() - want.size(), want.c_str()) != 0) continue;
+            if (fs.m_uncomp_size == 0 || fs.m_uncomp_size > (8ULL << 20)) continue;
+            size_t sz = 0;
+            void* p = mz_zip_reader_extract_to_heap(&z, i, &sz, 0);
+            if (p) { parseUiTxt(toWide(string((const char*)p, sz))); mz_free(p); ok = true; }
+            break;
+        }
     }
     mz_zip_reader_end(&z);
     return ok;
@@ -394,7 +518,7 @@ static bool runInstaller(const wstring& pkg, const wstring& addons, const wstrin
     DeleteFileW(result.c_str());
     // --no-prompt: занятые файлы - сразу код 4, без окна "закройте Corel и нажмите Повторить" (оно выскакивало из скрытого процесса
     // администратора, терялось за окнами, и обновление висело до таймаута). На код 4 doUpdate сам закрывает Corel и повторяет.
-    wstring args = L"--silent --no-prompt --kind update --target \"" + addons + L"\" --result \"" + result + L"\" --log \"" + tmp + L"\\installer.log\" --wait-locked 30" +
+    wstring args = L"--silent --no-prompt --kind update --target \"" + addons + L"\" --result \"" + result + L"\" --log \"" + tmp + L"\\installer.log\" --wait-locked 30 --lang \"" + g_langCode + L"\"" +
                    (extra.empty() ? L"" : L" " + extra);
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof sei;
@@ -412,8 +536,15 @@ static bool runInstaller(const wstring& pkg, const wstring& addons, const wstrin
     if (timedOut) ec = 98;
     *code = (int)ec;
     string r;
-    if (readFile(result, r, 65536)) *text = toWide(r);
-    else if (timedOut) *text = L"installer did not finish in 30 min";
+    if (readFile(result, r, 65536)) {
+        // установщик пишет "ERR <код> <текст>": код уже стоит в окне ("... (4): ..."), оставляем только текст
+        if (r.size() > 4 && r.compare(0, 4, "ERR ") == 0) {
+            size_t sp = r.find(' ', 4);
+            if (sp != string::npos) r = r.substr(sp + 1);
+        }
+        *text = toWide(r);
+    }
+    else if (timedOut) *text = tr(E_TIMEOUT);
     return ec == 0;
 }
 
@@ -479,15 +610,15 @@ static int doUpdate(const Args& a, wstring* errText)
         status(tr(T_SIG)); progress(52);
         string zipData, sigText;
         DWORD le = 0;
-        if (!readRetry(zipPath, zipData, 512ULL * 1024 * 1024, &le)) { *errText = wstring(tr(E_AV)) + L" (read update.zip, " + std::to_wstring(le) + L")"; rc = 62; goto done; }
-        if (!readRetry(sigPath, sigText, 65536, &le)) { *errText = wstring(tr(E_AV)) + L" (read update.sig, " + std::to_wstring(le) + L")"; rc = 62; goto done; }
+        if (!readRetry(zipPath, zipData, 512ULL * 1024 * 1024, &le)) { *errText = tr(E_AV); ulog(L"read update.zip failed: " + std::to_wstring(le)); rc = 62; goto done; }
+        if (!readRetry(sigPath, sigText, 65536, &le)) { *errText = tr(E_AV); ulog(L"read update.sig failed: " + std::to_wstring(le)); rc = 62; goto done; }
         ulog(L"downloaded: zip " + std::to_wstring(zipData.size()) + L" bytes, sig " + std::to_wstring(sigText.size()) + L" bytes");
         if (!verifyArchive(zipData, sigText)) { *errText = tr(E_SIG); rc = 61; goto done; }
         ulog(L"signature OK");
 
         status(tr(T_UNPACK)); progress(60);
         makeDirs(pkg);
-        if (!extractZip(zipData, pkg, &err)) { *errText = wstring(tr(E_PKG)) + L" (" + toWide(err) + L")"; rc = 62; goto done; }
+        if (!extractZip(zipData, pkg, &err)) { *errText = tr(E_PKG); ulog(L"extract failed: " + toWide(err)); rc = 62; goto done; }
         // архив собран вместе с папкой ("woodman docker/wood_install.exe"): корень пакета - единственная вложенная папка
         if (!exists(pkg + L"\\wood_install.exe")) {
             WIN32_FIND_DATAW fd;
@@ -505,7 +636,13 @@ static int doUpdate(const Args& a, wstring* errText)
         const wchar_t* need[2] = { L"\\wood_install.exe", L"\\wpanel\\js\\sys.js" };
         for (int k = 0; k < 2; k++) {
             for (int i = 0; i < 10 && !exists(root + need[k]); i++) Sleep(500);
-            if (!exists(root + need[k])) { *errText = wstring(tr(E_AV)) + L" (missing " + (need[k] + 1) + L")"; rc = 62; goto done; }
+            if (!exists(root + need[k])) {
+                *errText = tr(E_MISSING);
+                size_t p = errText->find(L"{0}");
+                if (p != wstring::npos) errText->replace(p, 3, need[k] + 1);
+                ulog(L"missing in package: " + wstring(need[k] + 1));
+                rc = 62; goto done;
+            }
         }
     }
 
@@ -546,8 +683,11 @@ static int doUpdate(const Args& a, wstring* errText)
         if (!ok) {
             if (ic == -1) *errText = tr(E_UAC);
             else {
-                *errText = wstring(tr(E_INST)) + L" (" + std::to_wstring(ic) + L"): " + itext;
-                if (ic == 6) *errText += L" " + wstring(tr(E_ROLLED));
+                *errText = tr(E_INST);
+                size_t p = errText->find(L"{0}");
+                if (p != wstring::npos) errText->replace(p, 3, std::to_wstring(ic));
+                if (!itext.empty()) *errText += L"\n" + itext;
+                if (ic == 6) *errText += L" " + tr(E_ROLLED);
             }
             rc = 64;
         }
@@ -592,9 +732,11 @@ static LRESULT CALLBACK wndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_STATUS: { wstring* s = (wstring*)l; SetWindowTextW(g_label, s->c_str()); delete s; return 0; }
     case WM_PROGRESS: SendMessageW(g_bar, PBM_SETPOS, w, 0); return 0;
     case WM_FINISH:
-        if (g_work2->rc != 0 && !g_work2->err.empty())
-            MessageBoxW(h, g_work2->err.c_str(), tr(T_TITLE), MB_OK | (g_work2->rc == 63 ? MB_ICONWARNING : MB_ICONERROR));
-        else SetWindowTextW(g_label, tr(T_DONE));
+        if (g_work2->rc != 0 && !g_work2->err.empty()) {
+            wstring title = tr(T_TITLE);
+            MessageBoxW(h, g_work2->err.c_str(), title.c_str(), MB_OK | (g_work2->rc == 63 ? MB_ICONWARNING : MB_ICONERROR));
+        }
+        else SetWindowTextW(g_label, tr(T_DONE).c_str());
         DestroyWindow(h);
         return 0;
     case WM_COMMAND:
@@ -616,11 +758,12 @@ static int runWithWindow(Work& w)
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
     int W = 440, H = 150;
-    g_wnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, tr(T_TITLE), WS_CAPTION | WS_SYSMENU, (GetSystemMetrics(SM_CXSCREEN) - W) / 2, (GetSystemMetrics(SM_CYSCREEN) - H) / 2, W, H, nullptr, nullptr, hi, nullptr);
+    wstring title = tr(T_TITLE), cancel = tr(T_CANCEL);
+    g_wnd = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, title.c_str(), WS_CAPTION | WS_SYSMENU, (GetSystemMetrics(SM_CXSCREEN) - W) / 2, (GetSystemMetrics(SM_CYSCREEN) - H) / 2, W, H, nullptr, nullptr, hi, nullptr);
     HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
     g_label = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 14, 400, 34, g_wnd, nullptr, hi, nullptr);
     g_bar = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE, 16, 54, 400, 16, g_wnd, nullptr, hi, nullptr);
-    HWND btn = CreateWindowExW(0, L"BUTTON", tr(T_CANCEL), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 326, 80, 90, 24, g_wnd, (HMENU)1001, hi, nullptr);
+    HWND btn = CreateWindowExW(0, L"BUTTON", cancel.c_str(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 326, 80, 90, 24, g_wnd, (HMENU)1001, hi, nullptr);
     SendMessageW(g_label, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(btn, WM_SETFONT, (WPARAM)font, TRUE);
     SendMessageW(g_bar, PBM_SETRANGE32, 0, 100);
@@ -656,7 +799,7 @@ static int run(int argc, wchar_t** argv)
         else if (k == L"--stage-dir") next(a.stageDir);
         else if (k == L"--installer-extra") next(a.installerExtra);   // стенды: --no-registry, свои папки копий и настроек
     }
-    g_ru = !(lang.size() >= 2 && (lang.compare(0, 2, L"en") == 0 || lang.compare(0, 2, L"de") == 0 || lang.compare(0, 2, L"es") == 0 || lang.compare(0, 2, L"pt") == 0 || lang.compare(0, 2, L"tr") == 0 || lang.compare(0, 2, L"zh") == 0 || lang.compare(0, 2, L"ar") == 0));
+    g_langCode = lang.empty() ? wstring(L"ru") : lang;
     g_noUi = noUi;
     if (a.stageDir.empty() || a.addons.empty()) { fprintf(stderr, "update: не хватает аргументов (--stage-dir, --addons); архив и подпись скачивает панель (Corel) в stage-dir\n"); return 2; }
     while (a.addons.size() > 3 && (a.addons.back() == L'\\' || a.addons.back() == L'/')) a.addons.pop_back();
@@ -676,6 +819,9 @@ static int run(int argc, wchar_t** argv)
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
         return 0;
     }
+
+    // тексты окна - из локали НОВОЙ версии (в архиве), до показа окна; не вышло - англ. фолбэк
+    if (!loadUiTxt(a.stageDir + L"\\update.zip")) ulog(L"ui texts: no " + g_langCode + L".js in package, built-in English");
 
     Work w;
     w.a = a;
