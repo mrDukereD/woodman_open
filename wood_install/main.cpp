@@ -3,6 +3,8 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <commctrl.h>
+#include <tlhelp32.h>
+#include <RestartManager.h>
 #include <string>
 #include <vector>
 #include <map>
@@ -20,6 +22,7 @@
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Gdi32.lib")
 #pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Rstrtmgr.lib")
 
 // ---------------- Registry ----------------
 static const wchar_t* kCompanyKey = L"Software\\WPanel";
@@ -312,8 +315,8 @@ static std::map<std::wstring, std::wstring> g_en = {
     {L"CleanupComplete", L"Full cleanup completed (backup created)."},
     {L"SourceMissing", L"Source folder 'wpanel' was not found next to the installer EXE."},
     {L"InstallDisabled", L"Installation is disabled until the 'wpanel' folder is placed next to the installer."},
-    {L"FilesInUse", L"Cannot install: these files are in use by another program:\n{0}\nClose CorelDRAW and run the installation again."},
-    {L"FilesInUseRetry", L"These files are in use by another program:\n{0}\nClose CorelDRAW and click Retry."},
+    {L"FilesInUse", L"Cannot install: these files are in use by another program:\n{0}\nClose that program (usually CorelDRAW) and run the installation again."},
+    {L"FilesInUseRetry", L"These files are in use by another program:\n{0}\nClose it (usually CorelDRAW) and click Retry."},
     {L"RunCorel", L"Run CorelDRAW"},
     {L"FinishInstall", L"Finish installation"},
     {L"RemoveFolderConfirm", L"Remove folder from the list?\n{0}"},
@@ -1194,19 +1197,100 @@ static void ApplyCorelTweaks(HWND hDlg, int corelVer)
 }
 
 // ---------------- Install / Cleanup ----------------
+// Полный путь к exe процесса ("" - не удалось узнать: процесс защищён/уже завершился).
+static std::wstring ProcessImagePath(DWORD pid)
+{
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return L"";
+    wchar_t buf[MAX_PATH * 2]{};
+    DWORD n = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+    std::wstring out;
+    if (QueryFullProcessImageNameW(h, 0, buf, &n) && n > 0) out.assign(buf, n);
+    CloseHandle(h);
+    return out;
+}
+
+// Запущен ли CorelDRAW этой установки. dstRoot - ...\Programs64\Addons\wpanel (или ...\Programs\Addons\wpanel):
+// по нему находим папку Programs и ищем живой CorelDRW.exe именно из неё.
+// Открытие proxy.dll на запись для этого НЕ годится: без открытой панели Corel proxy не держит, зато
+// антивирус может мимоходом держать файл - отсюда ложное "Corel открыт" и окно занятости при закрытом Corel.
+static bool IsCorelRunningForAddons(const std::wstring& dstRoot, std::wstring* foundPath = nullptr)
+{
+    std::wstring dir = dstRoot;
+    while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+    auto stripTail = [&dir](const wchar_t* tail) {
+        const size_t n = wcslen(tail);
+        if (dir.size() >= n && _wcsicmp(dir.c_str() + dir.size() - n, tail) == 0) dir.erase(dir.size() - n);
+    };
+    stripTail(L"\\wpanel");
+    stripTail(L"\\Addons");
+    while (!dir.empty() && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+    if (dir.empty()) return false;
+    const std::wstring prefix = dir + L"\\";
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof pe;
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"CorelDRW.exe") != 0 && _wcsicmp(pe.szExeFile, L"CorelDRAW.exe") != 0) continue;
+            const std::wstring path = ProcessImagePath(pe.th32ProcessID);
+            if (path.empty()) { if (foundPath) *foundPath = std::wstring(pe.szExeFile) + L" (путь не узнать)"; found = true; break; }
+            if (_wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) == 0) { if (foundPath) *foundPath = path; found = true; break; }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// Кто держит файл (только для подписи в окне/журнале): имена процессов из Restart Manager, "" - не узнать.
+static void WhoHolds(const std::wstring& path, std::wstring* who)
+{
+    if (!who) return;
+    DWORD ses = 0;
+    WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+    if (RmStartSession(&ses, 0, key) != ERROR_SUCCESS) return;
+    LPCWSTR f = path.c_str();
+    if (RmRegisterResources(ses, 1, &f, 0, nullptr, 0, nullptr) == ERROR_SUCCESS) {
+        UINT need = 0, n = 0;
+        DWORD reason = 0;
+        if (RmGetList(ses, &need, &n, nullptr, &reason) == ERROR_MORE_DATA) {
+            std::vector<RM_PROCESS_INFO> pi(need + 4);
+            n = (UINT)pi.size();
+            if (RmGetList(ses, &need, &n, pi.data(), &reason) == ERROR_SUCCESS) {
+                for (UINT i = 0; i < n; i++)
+                    *who += (who->empty() ? L"" : L", ") + std::wstring(pi[i].strAppName) + L" (" + std::to_wstring(pi[i].Process.dwProcessId) + L")";
+            }
+        }
+    }
+    RmEndSession(ses);
+}
+
+// Может ли установщик сейчас писать файл: 1 - нет (занят), 0 - да, -1 - проверить не вышло (нет доступа и т. п.,
+// тогда не мешаем - как и раньше). Проверяем именно запись, но разрешая другим читать/писать файл: открытие с
+// нулевым доступом к совместному использованию давало ложное "занято" на мимолётном обращении антивируса.
+static int FileLockedForWrite(const std::wstring& path, std::wstring* who)
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); return 0; }
+    if (GetLastError() != ERROR_SHARING_VIOLATION) return -1;
+    WhoHolds(path, who);
+    return 1;
+}
+
 // A DLL loaded by CorelDRAW cannot be opened for writing (sharing violation).
 // srcRoot - папка wpanel релиза: одинаковые с ним файлы занятыми не считаются (их не копируют).
 static std::wstring FindLockedFiles(const std::wstring& dstRoot, const std::wstring& srcRoot = L"")
 {
     // wood_server.exe - сервер рендера: пока он работает, копирование падает на нём посреди установки
     static const wchar_t* kFiles[] = { L"proxy.dll", L"proxy32.dll", L"bin\\main.dll", L"bin\\main32.dll", L"bin\\wood_server.exe", L"wpanel.gms" };
-    // Докер загружен в Corel (proxy занята), даже если сама proxy не меняется
-    bool corelOpen = false;
-    for (const wchar_t* px : { L"proxy.dll", L"proxy32.dll" }) {
-        HANDLE h = CreateFileW((dstRoot + L"\\" + px).c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        else if (GetLastError() == ERROR_SHARING_VIOLATION) corelOpen = true;
-    }
+    // Реальная проверка процесса, а не "proxy.dll не открылась на запись".
+    std::wstring corelPath;
+    const bool corelOpen = IsCorelRunningForAddons(dstRoot, &corelPath);
+    LogLine(std::wstring(L"INFO: CorelDRAW ") + (corelOpen ? (L"is running: " + corelPath) : std::wstring(L"is not running")) + L" (target: " + dstRoot + L")");
     std::wstring locked;
     for (const wchar_t* rel : kFiles) {
         const std::wstring p = dstRoot + L"\\" + rel;
@@ -1214,13 +1298,13 @@ static std::wstring FindLockedFiles(const std::wstring& dstRoot, const std::wstr
         // в релизе файла нет (копировать его не будут) или он тот же - не мешает; то же правило у wood_server (willReplace)
         if (!srcRoot.empty() && (!PathFileExistsW((srcRoot + L"\\" + rel).c_str()) || FilesIdentical(srcRoot + L"\\" + rel, p))) continue;
         // wpanel.gms Corel держит не всё время, но при закрытии перезаписывает его своим проектом из памяти: новый gms при
-        // открытом Corel был бы молча затёрт. Меняется gms (или восстановление) и Corel открыт - считаем занятым.
-        if (corelOpen && _wcsicmp(rel, L"wpanel.gms") == 0) { locked += L"  " + std::wstring(rel) + L"\n"; continue; }
-        HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); continue; }
-        DWORD err = GetLastError();
-        LogLine(L"INFO: FindLockedFiles - cannot open for write (err " + std::to_wstring(err) + L"): " + p);
-        if (err == ERROR_SHARING_VIOLATION) locked += L"  " + std::wstring(rel) + L"\n";
+        // запущенном Corel был бы молча затёрт. Меняется gms (или восстановление) и Corel запущен - считаем занятым.
+        if (corelOpen && _wcsicmp(rel, L"wpanel.gms") == 0) { locked += L"  " + std::wstring(rel) + L" (CorelDRAW)\n"; continue; }
+        std::wstring who;
+        int held = FileLockedForWrite(p, &who);
+        if (held != 1) continue;
+        LogLine(L"INFO: FindLockedFiles - locked" + (who.empty() ? L"" : L" by " + who) + L": " + p);
+        locked += L"  " + std::wstring(rel) + (who.empty() ? L"" : L" (" + who + L")") + L"\n";
     }
     return locked;
 }
@@ -1473,7 +1557,8 @@ static int RestoreBackup(const std::wstring& backupDir, const std::wstring& addo
     if (!doWp && !doSt) { if (err) *err = T(L"RestoreNothing"); return 9; }
     const std::wstring wp = addonsPath + L"\\wpanel";
     // Занятые DLL = Corel открыт: он держит файлы докера и перезапишет настройки при закрытии.
-    if (!addonsPath.empty()) {
+    // «Только настройки» файлы докера не трогают - проверка не нужна.
+    if (doWp && !addonsPath.empty()) {
         std::wstring locked = FindLockedFiles(wp);
         if (!locked.empty()) {
             if (err) {
@@ -1919,8 +2004,11 @@ static void DoRestoreFromBackup(HWND hDlg)
     const bool haveSel = !(sel == LB_ERR || sel < 0 || sel >= (int)g_found.size());
     if (touchesWpanel && !haveSel) { ShowMsg(hDlg, T(L"SelectCorel"), MB_ICONWARNING); return; }
 
-    std::wstring locked = FindLockedAnyCorel();
-    if (!locked.empty()) { ShowFilesInUse(hDlg, locked); return; }
+    // Только настройки не трогают DLL докера: при открытом Corel они не мешают, проверять занятость незачем.
+    if (touchesWpanel) {
+        std::wstring locked = FindLockedAnyCorel();
+        if (!locked.empty()) { ShowFilesInUse(hDlg, locked); return; }
+    }
 
     if (MessageBoxW(hDlg, T(L"RestoreConfirm").c_str(), T(L"RestoreDialogTitle").c_str(), MB_YESNO | MB_ICONQUESTION) != IDYES) return;
     std::wstring err;
