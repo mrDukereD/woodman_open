@@ -1281,6 +1281,8 @@ static int FileLockedForWrite(const std::wstring& path, std::wstring* who)
     return 1;
 }
 
+static bool g_fromCorel = false;   // --silent: запуск из обновления докера (wood_server.exe), а не ручная установка
+
 // A DLL loaded by CorelDRAW cannot be opened for writing (sharing violation).
 // srcRoot - папка wpanel релиза: одинаковые с ним файлы занятыми не считаются (их не копируют).
 static std::wstring FindLockedFiles(const std::wstring& dstRoot, const std::wstring& srcRoot = L"")
@@ -1297,9 +1299,17 @@ static std::wstring FindLockedFiles(const std::wstring& dstRoot, const std::wstr
         if (!PathFileExistsW(p.c_str())) continue;
         // в релизе файла нет (копировать его не будут) или он тот же - не мешает; то же правило у wood_server (willReplace)
         if (!srcRoot.empty() && (!PathFileExistsW((srcRoot + L"\\" + rel).c_str()) || FilesIdentical(srcRoot + L"\\" + rel, p))) continue;
-        // wpanel.gms Corel держит не всё время, но при закрытии перезаписывает его своим проектом из памяти: новый gms при
-        // запущенном Corel был бы молча затёрт. Меняется gms (или восстановление) и Corel запущен - считаем занятым.
-        if (corelOpen && _wcsicmp(rel, L"wpanel.gms") == 0) { locked += L"  " + std::wstring(rel) + L" (CorelDRAW)\n"; continue; }
+        // wpanel.gms и proxy*.dll заменить при запущенном Corel нельзя в принципе: gms Corel при закрытии перезаписывает своим
+        // проектом из памяти, proxy выгрузить некому. Меняется такой файл (или восстановление) - занят, пока жив Corel; сам файл
+        // на запись не проверяем (мимолётный антивирус давал ложное "занято"), решает живой процесс.
+        const bool isProxy = _wcsnicmp(rel, L"proxy", 5) == 0;
+        if (isProxy || _wcsicmp(rel, L"wpanel.gms") == 0) {
+            if (corelOpen) locked += L"  " + std::wstring(rel) + L" (CorelDRAW)\n";
+            continue;
+        }
+        // main*.dll: настоящая проверка занятости нужна только при ручной установке. Из Corel (--silent) её выгружает proxy,
+        // а ждёт и проверяет wood_server.exe до запуска установщика.
+        if (g_fromCorel && _wcsnicmp(rel, L"bin\\main", 8) == 0) continue;
         std::wstring who;
         int held = FileLockedForWrite(p, &who);
         if (held != 1) continue;
@@ -1828,6 +1838,7 @@ static int RunHeadless(int argc, wchar_t** argv)
         else if (a == L"--only-settings") onlySettings = true;
         else if (a == L"--wait-locked") { next(v); o.waitLockedSec = _wtoi(v.c_str()); }
         else if (a == L"--no-prompt") o.prompt = false;
+        else if (a == L"--silent") g_fromCorel = true;
         else if (a == L"--kind") next(o.kind);
         else if (a == L"--result") next(resultFile);
         else if (a == L"--log") next(g_logPath);
