@@ -19,12 +19,15 @@
 #include <winhttp.h>
 #include <commctrl.h>
 #include <RestartManager.h>
+#include <ole2.h>                 // COM: Ctrl + "Закрыть CorelDRAW" снимает Dirty у документов (discardCorelDocs)
 #include "miniz.h"
 #pragma comment(lib, "rstrtmgr.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #include "pubkey_release.h"
 
 namespace upd {
@@ -77,7 +80,7 @@ static const TxtEn kTxtEn[] = {
     {L"upd_starting_corel", L"Starting CorelDRAW..."},
     {L"upd_done", L"Done."},
     {L"upd_cancel", L"Cancel"},
-    {L"upd_q_close", L"The update needs CorelDRAW to be closed. It will offer to save your open files.\nClose CorelDRAW now?"},
+    {L"upd_q_close", L"The update needs CorelDRAW to be closed. It will offer to save your open files.\nClose CorelDRAW now?\n\nCtrl + \"Close CorelDRAW\" - close without saving files."},
     {L"upd_q_close_yes", L"Close CorelDRAW"},
     {L"upd_q_close_no", L"Cancel"},
     {L"upd_q_done_ok", L"The update is installed."},
@@ -107,23 +110,63 @@ static wstring tr(const wchar_t* key)
 // Вопрос пользователю с двумя своими подписями кнопок (MessageBox их не умеет: подписи подменяет CBT-хук). Да -> true.
 static HHOOK g_askHook = nullptr;
 static const wchar_t *g_askYes = L"", *g_askNo = L"";
+// Кнопки MessageBox узкие под "Да/Нет": свои подписи ("Закрыть CorelDRAW", "Запустить CorelDRAW") в них не влезали.
+// Ширина кнопок - по самой длинной подписи шрифтом кнопки; не хватает места - окно расширяется (и сдвигается, чтобы остаться по центру).
+static void askFitButtons(HWND dlg)
+{
+    HWND by = GetDlgItem(dlg, IDYES), bn = GetDlgItem(dlg, IDNO);
+    if (!by || !bn) return;
+    HDC dc = GetDC(by);
+    HFONT f = (HFONT)SendMessageW(by, WM_GETFONT, 0, 0);
+    HGDIOBJ old = f ? SelectObject(dc, f) : nullptr;
+    SIZE sy = {}, sn = {};
+    GetTextExtentPoint32W(dc, g_askYes, (int)wcslen(g_askYes), &sy);
+    GetTextExtentPoint32W(dc, g_askNo, (int)wcslen(g_askNo), &sn);
+    if (old) SelectObject(dc, old);
+    ReleaseDC(by, dc);
+    RECT ry, rn, rc;
+    GetWindowRect(by, &ry); GetWindowRect(bn, &rn);
+    MapWindowPoints(nullptr, dlg, (POINT*)&ry, 2); MapWindowPoints(nullptr, dlg, (POINT*)&rn, 2);
+    int h = ry.bottom - ry.top, w0 = ry.right - ry.left;
+    int tw = sy.cx > sn.cx ? sy.cx : sn.cx;
+    int w = tw + h;                                     // поля по бокам текста - примерно высота кнопки
+    if (w <= w0) return;
+    int gap = rn.left - ry.right;
+    if (gap < 4) gap = 8;
+    GetClientRect(dlg, &rc);
+    int margin = rc.right - rn.right;                   // отступ справа (слева берём такой же)
+    if (margin < 8) margin = 8;
+    int need = 2 * w + gap + 2 * margin;
+    if (need > rc.right) {
+        RECT wr; GetWindowRect(dlg, &wr);
+        int dx = need - rc.right;
+        SetWindowPos(dlg, nullptr, wr.left - dx / 2, wr.top, wr.right - wr.left + dx, wr.bottom - wr.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        GetClientRect(dlg, &rc);
+    }
+    int xn = rc.right - margin - w;
+    SetWindowPos(bn, nullptr, xn, rn.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(by, nullptr, xn - gap - w, ry.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
 static LRESULT CALLBACK askHookProc(int code, WPARAM w, LPARAM l)
 {
     if (code == HCBT_ACTIVATE) {
         HWND h = (HWND)w;
         SetDlgItemTextW(h, IDYES, g_askYes);
         SetDlgItemTextW(h, IDNO, g_askNo);
+        askFitButtons(h);
         UnhookWindowsHookEx(g_askHook); g_askHook = nullptr;
         return 0;
     }
     return CallNextHookEx(g_askHook, code, w, l);
 }
-static bool askUser(const wstring& text, const wstring& yes, const wstring& no, UINT icon)
+// ctrl (необязательно): была ли зажата Ctrl в момент ответа (клик или Enter по кнопке)
+static bool askUser(const wstring& text, const wstring& yes, const wstring& no, UINT icon, bool* ctrl = nullptr)
 {
     g_askYes = yes.c_str(); g_askNo = no.c_str();
     wstring title = tr(T_TITLE);
     g_askHook = SetWindowsHookExW(WH_CBT, askHookProc, nullptr, GetCurrentThreadId());
     int r = MessageBoxW(nullptr, text.c_str(), title.c_str(), MB_YESNO | icon | MB_TOPMOST | MB_SETFOREGROUND);
+    if (ctrl) *ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     if (g_askHook) { UnhookWindowsHookEx(g_askHook); g_askHook = nullptr; }
     return r == IDYES;
 }
@@ -581,7 +624,67 @@ static void clearStage(const wstring& dir)
     RemoveDirectoryW(dir.c_str());
 }
 
+// ---- Ctrl + "Закрыть CorelDRAW": закрыть без сохранения ----
+// Как кнопка "Закрыть всё" докера (cat_actions close_all): у каждого документа снимается Dirty, тогда Corel при WM_CLOSE
+// ничего не спрашивает. Corel берётся через COM из таблицы запущенных объектов: ProgID с версией CorelDRW.exe
+// (CorelDRAW.Application.27), без версии - запасной. Не вышло - просто обычное закрытие, Corel спросит про сохранение сам.
+static bool dispCall(IDispatch* d, const wchar_t* name, WORD flags, VARIANT* args, UINT nargs, VARIANT* out)
+{
+    DISPID id;
+    LPOLESTR n = (LPOLESTR)name;
+    if (FAILED(d->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id))) return false;
+    DISPID put = DISPID_PROPERTYPUT;
+    DISPPARAMS p = { args, flags == DISPATCH_PROPERTYPUT ? &put : nullptr, nargs, flags == DISPATCH_PROPERTYPUT ? 1u : 0u };
+    if (out) VariantInit(out);
+    return SUCCEEDED(d->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, flags, &p, out, nullptr, nullptr));
+}
+static IDispatch* corelApp(const Args& a)
+{
+    vector<wstring> ids;
+    string ver = a.corelExe.empty() ? string() : fileVersion(a.corelExe);
+    if (!ver.empty()) ids.push_back(L"CorelDRAW.Application." + toWide(ver.substr(0, ver.find('.'))));
+    ids.push_back(L"CorelDRAW.Application");
+    for (const wstring& pid : ids) {
+        CLSID cls;
+        IUnknown* u = nullptr;
+        if (FAILED(CLSIDFromProgID(pid.c_str(), &cls)) || FAILED(GetActiveObject(cls, nullptr, &u)) || !u) continue;
+        IDispatch* d = nullptr;
+        u->QueryInterface(IID_IDispatch, (void**)&d);
+        u->Release();
+        if (d) { ulog(L"discard: Corel via " + pid); return d; }
+    }
+    return nullptr;
+}
+static void discardCorelDocs(const Args& a)
+{
+    HRESULT hi = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    IDispatch* app = corelApp(a);
+    int n = 0, cleared = 0;
+    if (app) {
+        VARIANT docs;
+        if (dispCall(app, L"Documents", DISPATCH_PROPERTYGET, nullptr, 0, &docs) && docs.vt == VT_DISPATCH && docs.pdispVal) {
+            VARIANT cnt;
+            if (dispCall(docs.pdispVal, L"Count", DISPATCH_PROPERTYGET, nullptr, 0, &cnt) && SUCCEEDED(VariantChangeType(&cnt, &cnt, 0, VT_I4))) n = cnt.lVal;
+            for (int i = 1; i <= n; i++) {
+                VARIANT idx; VariantInit(&idx); idx.vt = VT_I4; idx.lVal = i;
+                VARIANT doc;
+                if (!dispCall(docs.pdispVal, L"Item", DISPATCH_METHOD | DISPATCH_PROPERTYGET, &idx, 1, &doc)) continue;
+                if (doc.vt == VT_DISPATCH && doc.pdispVal) {
+                    VARIANT f; VariantInit(&f); f.vt = VT_BOOL; f.boolVal = VARIANT_FALSE;
+                    if (dispCall(doc.pdispVal, L"Dirty", DISPATCH_PROPERTYPUT, &f, 1, nullptr)) cleared++;
+                }
+                VariantClear(&doc);
+            }
+        }
+        VariantClear(&docs);
+        app->Release();
+    }
+    ulog(L"discard: documents " + std::to_wstring(n) + L", Dirty cleared " + std::to_wstring(cleared) + (app ? L"" : L" (Corel not found via COM)"));
+    if (SUCCEEDED(hi)) CoUninitialize();
+}
+
 // Согласие на закрытие Corel (--no-ui: стенды, без вопроса). false - пользователь отказался.
+// Ctrl на "Закрыть CorelDRAW" - закрыть без сохранения (снять Dirty у документов, см. discardCorelDocs).
 static bool confirmCloseCorel(const Args& a)
 {
     if (g_noUi || !a.corelPid) return true;
@@ -589,7 +692,11 @@ static bool confirmCloseCorel(const Args& a)
     if (!hc) return true;
     bool alive = WaitForSingleObject(hc, 0) == WAIT_TIMEOUT;
     CloseHandle(hc);
-    return !alive || askUser(tr(Q_CLOSE), tr(Q_CLOSE_Y), tr(Q_CLOSE_N), MB_ICONQUESTION);
+    if (!alive) return true;
+    bool ctrl = false;
+    if (!askUser(tr(Q_CLOSE), tr(Q_CLOSE_Y), tr(Q_CLOSE_N), MB_ICONQUESTION, &ctrl)) return false;
+    if (ctrl) discardCorelDocs(a);
+    return true;
 }
 
 // основная работа (в рабочем потоке или синхронно при --no-ui); возвращает код выхода
